@@ -77,7 +77,10 @@ tick_ms = 1000
 jobs_file = "cron_jobs.toml"
 
 [tui]
-stream_flush_ms = 45
+stream_flush_ms = 30
+assistant_msg_color = "cyan"
+user_msg_color = "green"
+system_msg_color = "yellow"
 ```
 
 字段说明：
@@ -142,6 +145,9 @@ api_key = "YOUR_OPENAI_API_KEY"
 
 `[tui]` 字段说明：
 - `stream_flush_ms`：流式输出缓冲刷新间隔（毫秒，建议 10~500；值越小越实时，越大越平滑）
+- `assistant_msg_color`：assistant 消息颜色（支持基础色名或 `#RRGGBB`）
+- `user_msg_color`：user 消息颜色（支持基础色名或 `#RRGGBB`）
+- `system_msg_color`：system 消息颜色（支持基础色名或 `#RRGGBB`）
 
 `cron_jobs.toml` 示例：
 

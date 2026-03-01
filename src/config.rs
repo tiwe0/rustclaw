@@ -127,6 +127,12 @@ pub struct CronConfig {
 pub struct TuiConfig {
     #[serde(default = "default_tui_stream_flush_ms")]
     pub stream_flush_ms: u64,
+    #[serde(default = "default_tui_assistant_msg_color")]
+    pub assistant_msg_color: String,
+    #[serde(default = "default_tui_user_msg_color")]
+    pub user_msg_color: String,
+    #[serde(default = "default_tui_system_msg_color")]
+    pub system_msg_color: String,
 }
 
 impl Default for MemoryConfig {
@@ -215,6 +221,9 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             stream_flush_ms: default_tui_stream_flush_ms(),
+            assistant_msg_color: default_tui_assistant_msg_color(),
+            user_msg_color: default_tui_user_msg_color(),
+            system_msg_color: default_tui_system_msg_color(),
         }
     }
 }
@@ -316,7 +325,19 @@ fn default_cron_jobs_file() -> String {
 }
 
 fn default_tui_stream_flush_ms() -> u64 {
-    45
+    30
+}
+
+fn default_tui_assistant_msg_color() -> String {
+    "cyan".to_string()
+}
+
+fn default_tui_user_msg_color() -> String {
+    "green".to_string()
+}
+
+fn default_tui_system_msg_color() -> String {
+    "yellow".to_string()
 }
 
 fn default_base_url_for_backend(backend: &str) -> Option<&'static str> {

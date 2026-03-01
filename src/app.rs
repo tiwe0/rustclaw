@@ -28,6 +28,8 @@ use crate::types::Message;
 
 const MAX_LINES: usize = 1000;
 const SCROLL_STEP: usize = 8;
+const UI_POLL_MS: u64 = 16;
+const STREAM_FORCE_FLUSH_BYTES: usize = 96;
 
 fn resolve_child_dir_for_log(app_base_dir: &std::path::Path, raw: &str) -> String {
     let path = std::path::PathBuf::from(raw);
@@ -118,6 +120,10 @@ pub async fn run() -> Result<()> {
         skills_config.default_skill,
     ));
 
+    let assistant_msg_color = parse_tui_color(&tui_config.assistant_msg_color, Color::Cyan);
+    let user_msg_color = parse_tui_color(&tui_config.user_msg_color, Color::Green);
+    let system_msg_color = parse_tui_color(&tui_config.system_msg_color, Color::Yellow);
+
     let session_manager = SessionManager::new(&app_base_dir)?;
     let active_session = session_manager.load_or_create_active(&system_prompt)?;
     let shared_session = Arc::new(Mutex::new(active_session));
@@ -133,6 +139,9 @@ pub async fn run() -> Result<()> {
         agent_config.react_max_loops,
         agent_config.react_stop_marker,
         tui_config.stream_flush_ms,
+        assistant_msg_color,
+        user_msg_color,
+        system_msg_color,
         system_prompt,
     )
     .await;
@@ -273,12 +282,22 @@ async fn run_tui_loop(
     react_max_loops: usize,
     react_stop_marker: String,
     stream_flush_ms: u64,
+    assistant_msg_color: Color,
+    user_msg_color: Color,
+    system_msg_color: Color,
     system_prompt: String,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<BackendEvent>();
     let mut running_tasks: HashMap<u64, JoinHandle<()>> = HashMap::new();
     let locked = session.lock().await;
-    let mut app = TuiApp::from_session(&locked, stream_enabled, stream_flush_ms);
+    let mut app = TuiApp::from_session(
+        &locked,
+        stream_enabled,
+        stream_flush_ms,
+        assistant_msg_color,
+        user_msg_color,
+        system_msg_color,
+    );
     drop(locked);
 
     loop {
@@ -324,7 +343,7 @@ async fn run_tui_loop(
             break;
         }
 
-        if event::poll(Duration::from_millis(50))? {
+        if event::poll(Duration::from_millis(UI_POLL_MS))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -803,10 +822,20 @@ struct TuiApp {
     stream_flush_interval: Duration,
     chat_view_lines: usize,
     chat_view_cols: usize,
+    assistant_msg_color: Color,
+    user_msg_color: Color,
+    system_msg_color: Color,
 }
 
 impl TuiApp {
-    fn from_session(session: &ChatSession, stream_enabled: bool, stream_flush_ms: u64) -> Self {
+    fn from_session(
+        session: &ChatSession,
+        stream_enabled: bool,
+        stream_flush_ms: u64,
+        assistant_msg_color: Color,
+        user_msg_color: Color,
+        system_msg_color: Color,
+    ) -> Self {
         let flush_ms = stream_flush_ms.clamp(10, 500);
         let mut app = Self {
             input: String::new(),
@@ -834,6 +863,9 @@ impl TuiApp {
             stream_tasks_dirty: HashSet::new(),
             last_stream_flush: Instant::now(),
             stream_flush_interval: Duration::from_millis(flush_ms),
+            assistant_msg_color,
+            user_msg_color,
+            system_msg_color,
         };
         app.rebuild_lines_from_messages(session);
         app.push_line("system> 输入 /help 查看命令，Esc/Ctrl+C 退出".to_string());
@@ -1190,11 +1222,24 @@ impl TuiApp {
     }
 
     fn flush_stream_buffers(&mut self, force: bool) {
-        if !force && self.last_stream_flush.elapsed() < self.stream_flush_interval {
-            return;
-        }
         if self.stream_tasks_dirty.is_empty() {
             return;
+        }
+
+        if !force {
+            let pending_bytes = self
+                .stream_tasks_dirty
+                .iter()
+                .filter_map(|task_id| self.stream_token_buffers.get(task_id))
+                .map(|buf| buf.len())
+                .sum::<usize>();
+
+            let reached_interval = self.last_stream_flush.elapsed() >= self.stream_flush_interval;
+            let reached_pending_limit = pending_bytes >= STREAM_FORCE_FLUSH_BYTES;
+
+            if !reached_interval && !reached_pending_limit {
+                return;
+            }
         }
 
         let task_ids = self.stream_tasks_dirty.iter().copied().collect::<Vec<_>>();
@@ -1262,11 +1307,15 @@ impl TuiApp {
                 self.set_assistant_phase(&session_id, AssistantPhase::Answering);
                 if self.session_id == session_id {
                     self.maybe_auto_scroll_on_reply();
+                    let flush_immediately = token.contains('\n') || token.len() >= 24;
                     self.stream_token_buffers
                         .entry(task_id)
                         .or_default()
                         .push_str(&token);
                     self.stream_tasks_dirty.insert(task_id);
+                    if flush_immediately {
+                        self.flush_stream_buffers(true);
+                    }
                 }
             }
             BackendEvent::SessionChanged { id, title } => {
@@ -1318,6 +1367,59 @@ impl TuiApp {
                 self.should_quit = true;
             }
         }
+    }
+}
+
+fn parse_tui_color(raw: &str, fallback: Color) -> Color {
+    let text = raw.trim();
+    if text.is_empty() {
+        return fallback;
+    }
+
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        _ => {
+            if let Some(hex) = lower.strip_prefix('#') {
+                if hex.len() == 6 {
+                    if let (Ok(r), Ok(g), Ok(b)) = (
+                        u8::from_str_radix(&hex[0..2], 16),
+                        u8::from_str_radix(&hex[2..4], 16),
+                        u8::from_str_radix(&hex[4..6], 16),
+                    ) {
+                        return Color::Rgb(r, g, b);
+                    }
+                }
+            }
+            fallback
+        }
+    }
+}
+
+fn message_role_color(line: &str, app: &TuiApp, previous: Color) -> Color {
+    if line.starts_with("assistant>") || line.starts_with("assistant(after_tool)>") {
+        app.assistant_msg_color
+    } else if line.starts_with("user>") {
+        app.user_msg_color
+    } else if line.starts_with("system>") {
+        app.system_msg_color
+    } else {
+        previous
     }
 }
 
@@ -1407,7 +1509,17 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     let scroll = app.chat_scroll.min(app.max_scroll_offset());
     let end = total.saturating_sub(scroll);
     let start = end.saturating_sub(max_lines);
-    let visible = visual_lines[start..end].join("\n");
+    let mut role_color = app.system_msg_color;
+    let visible = visual_lines[start..end]
+        .iter()
+        .map(|line| {
+            role_color = message_role_color(line, app, role_color);
+            Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(role_color),
+            ))
+        })
+        .collect::<Vec<Line>>();
 
     let chat_block = Block::default()
         .title(format!(

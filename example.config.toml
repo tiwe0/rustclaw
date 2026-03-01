@@ -48,4 +48,7 @@ tick_ms = 1000
 jobs_file = "cron_jobs.toml"
 
 [tui]
-stream_flush_ms = 45
+stream_flush_ms = 30
+assistant_msg_color = "cyan"
+user_msg_color = "green"
+system_msg_color = "yellow"
