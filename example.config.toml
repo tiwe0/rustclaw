@@ -1,0 +1,51 @@
+[base]
+base_dir = ".rustclaw"
+
+[log]
+enabled = true
+level = "info"
+file_enabled = true
+file_name = "rustclaw.log"
+
+[model]
+backend = "deepseek"
+stream = true
+name = "deepseek-chat"
+api_key = "sk-xxxx"
+base_url = "https://api.deepseek.com"
+
+[memory]
+enabled = true
+provider = "markdown"
+base_dir = "memory"
+default_key = "main"
+
+[skills]
+enabled = true
+provider = "markdown"
+base_dir = "skills"
+default_skill = "default"
+
+[agent]
+react_max_loops = 8
+react_stop_marker = "[[REACT_STOP]]"
+
+[channel]
+enabled = true
+provider = "telegram"
+
+[channel.telegram]
+bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
+# 可选：仅响应指定 chat
+# chat_id = 123456789
+poll_interval_ms = 1200
+long_poll_timeout_secs = 20
+api_base_url = "https://api.telegram.org"
+
+[cron]
+enabled = false
+tick_ms = 1000
+jobs_file = "cron_jobs.toml"
+
+[tui]
+stream_flush_ms = 45
