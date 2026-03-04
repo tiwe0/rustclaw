@@ -1,5 +1,5 @@
 [base]
-base_dir = ".rustclaw"
+base_dir = "~/.rustclaw"
 
 [log]
 enabled = true

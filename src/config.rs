@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub const DEFAULT_MODEL: &str = "deepseek-chat";
-pub const DEFAULT_CONFIG_PATH: &str = ".rustclaw/config.toml";
+pub const DEFAULT_CONFIG_PATH: &str = "~/.rustclaw/config.toml";
+const DEFAULT_CONFIG_DIR_NAME: &str = ".rustclaw";
+const DEFAULT_CONFIG_FILE_NAME: &str = "config.toml";
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../example.config.toml");
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -233,7 +236,7 @@ fn default_memory_enabled() -> bool {
 }
 
 fn default_base_base_dir() -> String {
-    ".rustclaw".to_string()
+    "~/.rustclaw".to_string()
 }
 
 fn default_log_enabled() -> bool {
@@ -363,7 +366,7 @@ pub fn resolve_base_url(config: &ModelConfig) -> Result<String> {
 }
 
 pub fn resolve_app_base_dir(workspace_root: &Path, base: &BaseConfig) -> PathBuf {
-    let path = PathBuf::from(&base.base_dir);
+    let path = expand_tilde_path(&base.base_dir);
     if path.is_absolute() {
         path
     } else {
@@ -372,11 +375,71 @@ pub fn resolve_app_base_dir(workspace_root: &Path, base: &BaseConfig) -> PathBuf
 }
 
 pub fn load_config(path: &str) -> Result<AppConfig> {
-    let content = fs::read_to_string(path).with_context(|| format!("读取配置文件失败: {}", path))?;
-    let cfg = toml::from_str::<AppConfig>(&content).context("解析 TOML 配置失败")?;
+    let resolved_path = expand_tilde_path(path);
+    let content = fs::read_to_string(&resolved_path)
+        .with_context(|| format!("读取配置文件失败: {}", resolved_path.display()))?;
+    let mut cfg = toml::from_str::<AppConfig>(&content).context("解析 TOML 配置失败")?;
+    normalize_legacy_base_dir(&mut cfg.base);
     Ok(cfg)
 }
 
 pub fn resolve_config_path() -> String {
-    env::var("RUSTCLAW_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string())
+    if let Err(err) = ensure_default_user_config() {
+        eprintln!("[config] 初始化默认配置失败: {err}");
+    }
+
+    env::var("RUSTCLAW_CONFIG").unwrap_or_else(|_| {
+        default_user_config_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+    })
+}
+
+fn ensure_default_user_config() -> Result<()> {
+    let Some(config_dir) = default_user_config_dir() else {
+        return Ok(());
+    };
+    let config_path = config_dir.join(DEFAULT_CONFIG_FILE_NAME);
+
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir)
+            .with_context(|| format!("创建配置目录失败: {}", config_dir.display()))?;
+    }
+
+    if !config_path.exists() {
+        fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
+            .with_context(|| format!("写入默认配置失败: {}", config_path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn default_user_config_path() -> Option<PathBuf> {
+    default_user_config_dir().map(|dir| dir.join(DEFAULT_CONFIG_FILE_NAME))
+}
+
+fn default_user_config_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(DEFAULT_CONFIG_DIR_NAME))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    if let Some(suffix) = path.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(suffix);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn normalize_legacy_base_dir(base: &mut BaseConfig) {
+    let normalized = base.base_dir.trim();
+    if normalized == ".rustclaw" || normalized == "./.rustclaw" {
+        base.base_dir = format!("~/{DEFAULT_CONFIG_DIR_NAME}");
+    }
 }

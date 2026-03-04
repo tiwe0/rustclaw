@@ -25,7 +25,7 @@
 
 ## 配置（TOML）
 
-默认从 `.rustclaw/config.toml` 加载配置（可用环境变量覆盖）：
+默认从 `~/.rustclaw/config.toml` 加载配置（可用环境变量覆盖）。首次启动若不存在该目录或配置文件，会自动创建并写入默认模板：
 
 ```toml
 [model]
@@ -36,7 +36,7 @@ api_key = "YOUR_DEEPSEEK_API_KEY"
 # base_url = "https://api.deepseek.com"
 
 [base]
-base_dir = ".rustclaw"
+base_dir = "~/.rustclaw"
 
 [log]
 enabled = true
@@ -91,7 +91,7 @@ system_msg_color = "yellow"
 - `base_url`：可选，覆盖后端默认地址
 
 `[base]` 字段说明：
-- `base_dir`：全局数据根目录（默认 `.rustclaw`），其余模块的 `base_dir` 均基于该目录解析
+- `base_dir`：全局数据根目录（默认 `~/.rustclaw`），其余模块的 `base_dir` 均基于该目录解析
 
 `[log]` 字段说明：
 - `enabled`：是否启用日志
@@ -141,7 +141,7 @@ api_key = "YOUR_OPENAI_API_KEY"
 - `enabled`：是否启用 cron 调度器
 - `tick_ms`：调度检查间隔（毫秒）
 - `jobs_file`：cron jobs 独立配置文件路径（TOML）
-	- 相对路径会基于 `[base].base_dir` 解析（默认即 `.rustclaw/cron_jobs.toml`）
+	- 相对路径会基于 `[base].base_dir` 解析（默认即 `~/.rustclaw/cron_jobs.toml`）
 
 `[tui]` 字段说明：
 - `stream_flush_ms`：流式输出缓冲刷新间隔（毫秒，建议 10~500；值越小越实时，越大越平滑）
@@ -281,7 +281,7 @@ TUI 键位：
 - `/exit`：退出
 
 可选环境变量：
-- `RUSTCLAW_CONFIG`：配置文件路径，默认 `.rustclaw/config.toml`
+- `RUSTCLAW_CONFIG`：配置文件路径，默认 `~/.rustclaw/config.toml`
 
 ## 示例说明
 - 内置工具 `get_time`，会在模型请求时被调用。
