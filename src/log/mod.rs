@@ -107,12 +107,6 @@ fn write_log(level: LogLevel, message: &str) {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
     let line = format!("[{}][{}] {}", timestamp, level.as_str(), message);
 
-    if level >= LogLevel::Warn {
-        eprintln!("{}", line);
-    } else {
-        println!("{}", line);
-    }
-
     if let Some(file_mutex) = &logger.file {
         if let Ok(mut file) = file_mutex.lock() {
             let _ = writeln!(file, "{}", line);

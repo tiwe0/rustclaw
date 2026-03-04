@@ -6,7 +6,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-use crate::tools::ToolPlugin;
+use crate::tools::{ToolPlugin, truncate_utf8};
 use crate::types::{ToolDefinition, ToolSchema};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 20;
@@ -105,9 +105,5 @@ fn shell_command(command: &str) -> Command {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...(truncated)", &s[..max])
-    }
+    truncate_utf8(s, max)
 }

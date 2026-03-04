@@ -4,7 +4,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::tools::ToolPlugin;
+use crate::tools::{ToolPlugin, truncate_utf8};
 use crate::types::{ToolDefinition, ToolSchema};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -105,11 +105,7 @@ impl ToolPlugin for HttpTool {
         let headers = response.headers().clone();
         let text = response.text().await.context("读取响应内容失败")?;
 
-        let body_preview = if text.len() > MAX_BODY_PREVIEW {
-            format!("{}...(truncated)", &text[..MAX_BODY_PREVIEW])
-        } else {
-            text
-        };
+        let body_preview = truncate_utf8(&text, MAX_BODY_PREVIEW);
 
         let content_type = headers
             .get(reqwest::header::CONTENT_TYPE)

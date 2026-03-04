@@ -111,7 +111,9 @@ where
         }
 
         on_tool_calls_started(tool_calls.len());
-        let tool_messages = tool_manager.run_tool_calls(&tool_calls).await?;
+        let tool_messages = tool_manager
+            .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1))
+            .await?;
         messages.extend(tool_messages);
     }
 

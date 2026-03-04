@@ -14,10 +14,11 @@
 - 多会话并发对话（后台任务互不阻塞）
 - 会话管理（SQLite 持久化：创建/切换/列出/清空）
 - tools 插件模式
+- web_browser 工具（Chromiumoxide：open/goto/click/input/screenshot/content）
 - skills 工具（可插拔后端，当前支持 markdown）
 - channel 模块（可接入 Telegram 等通讯软件）
 - cron 模块（定时唤醒 agent 执行预设 job）
-- log 模块（等级过滤 + 控制台/文件输出）
+- log 模块（等级过滤 + 文件输出）
 
 ## 依赖
 - Rust 1.78+（edition 2024）
@@ -96,7 +97,7 @@ system_msg_color = "yellow"
 `[log]` 字段说明：
 - `enabled`：是否启用日志
 - `level`：最小日志级别（`debug`/`info`/`warn`/`error`）
-- `file_enabled`：是否写入日志文件
+- `file_enabled`：是否写入日志文件（关闭后将不再输出日志）
 - `file_name`：日志文件名（位于 `[base].base_dir` 下）
 
 `openai` 配置示例：
@@ -206,6 +207,161 @@ enabled = false
 - 回答简洁、准确、可执行。
 - 不暴露内部思维链路，只给必要结论和步骤。
 - 若工具失败，说明失败原因并给出可行替代方案。
+
+web_browser 工具使用规则（必须遵守）：
+- 该工具支持 action：open / close / sessions / goto / scroll / html / content / click / input / screenshot。
+- 优先采用会话模式：先 open 获取 session_id；后续动作尽量复用 session_id，不要每一步都重新 open。
+- 若未显式传 session_id，工具会默认复用当前会话；可通过 sessions 查看可用会话。
+- 需要页面跳转时优先使用 goto，而不是在其他动作里反复传不同 url。
+- 任务结束后主动调用 close 释放浏览器资源。
+- close 必须提供 session_id；goto 必须提供 url；click/input 通常需要 selector；input 需要 text。
+- 若返回 ok=false 的工具结果，先阅读 error 再修正参数或更换策略，不要重复同一错误调用。
+```
+
+## web_browser 工具参数说明
+
+工具名：`web_browser`
+
+通用参数：
+- `action`：动作类型，支持 `open` / `close` / `sessions` / `goto` / `scroll` / `html` / `content` / `click` / `input` / `screenshot`
+- `session_id`：浏览器会话 ID（`open` 返回；后续动作传入可复用同一浏览器页面）
+- `url`：页面地址（仅允许 `http://` 或 `https://`；`open` 可省略，默认 `https://www.google.com`；其他动作在不传 `session_id` 时必填）
+- `headless`：是否无头模式（默认 `true`）
+
+动作参数：
+- `open`：可选传 `session_id`（用于覆盖已有同名会话）；`url` 不传时默认打开 `https://www.google.com`
+- `close`：需要 `session_id`，用于显式释放浏览器资源
+- `sessions`：查看当前可用会话列表以及当前默认会话
+- `goto`：需要 `url`，用于在当前会话中跳转页面
+- `scroll`：可选 `scroll_x`（默认 0）、`scroll_y`（默认 800），可选 `selector`（滚动指定元素）
+- `click`：需要 `selector`
+- `input`：需要 `selector` + `text`，可选 `clear`（默认 `true`）和 `submit`（默认 `false`）
+- `screenshot`：可选 `path`、`format`（`png`/`jpeg`）、`full_page`、`omit_background`
+- `content` / `html`：可选 `max_chars`（预览截断长度）
+
+返回说明：
+- `open`：返回 `session_id`、`title`、`keep_alive`
+- `close`：返回是否成功关闭会话
+- `sessions`：返回当前会话、会话数量和每个会话的 `session_id/url/title`
+- `goto`：返回跳转结果、当前 `url` 与 `title`
+- `scroll`：返回滚动动作执行结果、当前 `url` 与 `title`
+- `click` / `input`：返回动作执行状态、`title` 与当前 `url`
+- `screenshot`：返回截图文件 `path` 与 `bytes`
+- `content`：返回页面 `text` 和 `html` 预览
+
+默认复用规则：
+- 对于 `goto/scroll/html/content/click/input/screenshot`，若未传 `session_id`，工具会优先复用当前会话。
+- 若当前没有可用会话且提供了 `url`，会自动创建新会话并在该会话中执行动作。
+
+推荐流程：
+1) `open` 打开并持久化会话
+2) 使用 `session_id` 连续执行 `goto/scroll/click/input/content/screenshot/html`
+3) 完成后调用 `close` 释放资源
+
+### 示例参数（可直接给模型调用）
+
+1) 打开页面并创建会话：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "open",
+		"url": "https://example.com"
+	}
+}
+```
+
+2) 复用会话跳转页面：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "goto",
+		"session_id": "web_1741080000000_1",
+		"url": "https://example.com/docs"
+	}
+}
+```
+
+3) 复用会话点击元素：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "click",
+		"session_id": "web_1741080000000_1",
+		"selector": "a.more-link"
+	}
+}
+```
+
+4) 复用会话输入并提交：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "input",
+		"session_id": "web_1741080000000_1",
+		"selector": "input[name='q']",
+		"text": "rust chromiumoxide",
+		"clear": true,
+		"submit": true
+	}
+}
+```
+
+5) 复用会话截屏：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "screenshot",
+		"session_id": "web_1741080000000_1",
+		"format": "png",
+		"full_page": true
+	}
+}
+```
+
+6) 复用会话获取网页内容：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "content",
+		"session_id": "web_1741080000000_1",
+		"max_chars": 5000
+	}
+}
+```
+
+7) 关闭会话：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "close",
+		"session_id": "web_1741080000000_1"
+	}
+}
+```
+
+8) 查看当前会话列表：
+
+```json
+{
+	"name": "web_browser",
+	"arguments": {
+		"action": "sessions"
+	}
+}
 ```
 
 ## 快速开始（Windows cmd）

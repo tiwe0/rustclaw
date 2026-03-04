@@ -24,7 +24,6 @@ impl ConversationMode {
 
 #[async_trait]
 pub trait ConversationInterface: Send + Sync {
-    fn mode(&self) -> ConversationMode;
     async fn run(&self) -> Result<()>;
 }
 
@@ -34,7 +33,6 @@ pub async fn run_mode(mode: ConversationMode) -> Result<()> {
         ConversationMode::Telegram => Box::new(telegram::TelegramConversation),
     };
 
-    println!("[conversation] running mode: {:?}", impl_obj.mode());
     impl_obj.run().await
 }
 

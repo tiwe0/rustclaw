@@ -84,7 +84,16 @@ fn build_react_system_prompt(stop_marker: &str) -> String {
 输出要求：
 - 回答简洁、准确、可执行。
 - 不暴露内部思维链路，只给必要结论和步骤。
-- 若工具失败，说明失败原因并给出可行替代方案。",
+- 若工具失败，说明失败原因并给出可行替代方案。
+
+web_browser 工具使用规则（必须遵守）：
+- 该工具支持 action：open / close / sessions / goto / scroll / html / content / click / input / screenshot。
+- 优先采用会话模式：先 open 获取 session_id；后续动作尽量复用 session_id，不要每一步都重新 open。
+- 若未显式传 session_id，工具会默认复用当前会话；可通过 sessions 查看可用会话。
+- 需要页面跳转时优先使用 goto，而不是在其他动作里反复传不同 url。
+- 任务结束后主动调用 close 释放浏览器资源。
+- close 必须提供 session_id；click/input 通常需要 selector；input 需要 text。
+- 若返回 ok=false 的工具结果，先阅读 error 再修正参数或更换策略，不要重复同一错误调用。",
         marker = stop_marker
     )
 }

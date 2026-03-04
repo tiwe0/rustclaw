@@ -3,16 +3,12 @@ use async_trait::async_trait;
 
 use crate::channel;
 use crate::config::{load_config, resolve_config_path};
-use crate::conversation::{ConversationInterface, ConversationMode};
+use crate::conversation::ConversationInterface;
 
 pub struct TelegramConversation;
 
 #[async_trait]
 impl ConversationInterface for TelegramConversation {
-    fn mode(&self) -> ConversationMode {
-        ConversationMode::Telegram
-    }
-
     async fn run(&self) -> Result<()> {
         let config_path = resolve_config_path();
         let cfg = load_config(&config_path)?;
