@@ -62,6 +62,12 @@ impl ToolManager {
         self.plugins.values().map(|p| p.definition()).collect()
     }
 
+    pub fn shutdown(&self) {
+        for plugin in self.plugins.values() {
+            plugin.finit();
+        }
+    }
+
     pub async fn run_tool_calls_in_loop(
         &self,
         tool_calls: &[ToolCall],
@@ -150,9 +156,7 @@ impl ToolManager {
 
 impl Drop for ToolManager {
     fn drop(&mut self) {
-        for plugin in self.plugins.values() {
-            plugin.finit();
-        }
+        self.shutdown();
     }
 }
 

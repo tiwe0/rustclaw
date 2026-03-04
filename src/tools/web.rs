@@ -132,6 +132,10 @@ impl ToolPlugin for WebBrowserTool {
         }
     }
 
+    fn finit(&self) {
+        close_all_sessions_blocking();
+    }
+
     async fn execute(&self, args: Value) -> Result<Value> {
         log::debug(format!(
             "[web_browser][execute] received args={}"
@@ -255,6 +259,66 @@ impl ToolPlugin for WebBrowserTool {
         ));
 
         run_action_in_session(&action, &created_session_id, &args).await
+    }
+}
+
+async fn close_all_sessions() {
+    let handles = {
+        let mut store = session_store().write().await;
+        store.drain().map(|(_, handle)| handle).collect::<Vec<_>>()
+    };
+
+    {
+        let mut current = current_session_store().write().await;
+        *current = None;
+    }
+
+    if handles.is_empty() {
+        return;
+    }
+
+    log::debug(format!(
+        "[web_browser][finit] closing remaining sessions count={}"
+        , handles.len()
+    ));
+
+    for handle in handles {
+        let mut session = handle.lock().await;
+        let _ = session.browser.close().await;
+        session.handler_task.abort();
+    }
+
+    log::debug("[web_browser][finit] all remaining browser sessions closed");
+}
+
+fn close_all_sessions_blocking() {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| handle.block_on(close_all_sessions()))
+        }));
+
+        if result.is_err() {
+            log::warn(
+                "[web_browser][finit] fallback to async spawn cleanup in current runtime",
+            );
+            std::mem::drop(handle.spawn(close_all_sessions()));
+        }
+        return;
+    }
+
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => {
+            rt.block_on(close_all_sessions());
+        }
+        Err(err) => {
+            log::warn(format!(
+                "[web_browser][finit] create runtime for cleanup failed: {}",
+                err
+            ));
+        }
     }
 }
 

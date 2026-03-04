@@ -138,6 +138,7 @@ pub async fn run() -> Result<()> {
     let shared_session = Arc::new(Mutex::new(active_session));
 
     let mut terminal = init_terminal()?;
+    let tool_manager_for_shutdown = tool_manager.clone();
     let result = run_tui_loop(
         &mut terminal,
         client,
@@ -154,6 +155,7 @@ pub async fn run() -> Result<()> {
         system_prompt,
     )
     .await;
+    tool_manager_for_shutdown.shutdown();
     let _ = session_manager.save_all();
     restore_terminal(&mut terminal)?;
     result
@@ -233,7 +235,7 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
         name: None,
     });
 
-    let summary = run_react_loop(
+    let summary_result = run_react_loop(
         client.as_ref(),
         &tool_manager,
         &mut working_messages,
@@ -246,7 +248,9 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
         |_| {},
         |_| {},
     )
-    .await?;
+    .await;
+    tool_manager.shutdown();
+    let summary = summary_result?;
 
     if let Some(ref key) = session_key {
         if !key.eq_ignore_ascii_case("new") {
