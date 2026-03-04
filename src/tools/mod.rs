@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures_util::future::join_all;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::log;
@@ -13,6 +14,8 @@ use crate::types::{Message, ToolCall, ToolDefinition};
 pub mod http;
 pub mod web;
 pub mod exec;
+#[cfg(feature = "mobile")]
+pub mod mobile;
 pub mod memory;
 pub mod skills;
 pub mod time;
@@ -28,6 +31,7 @@ pub trait ToolPlugin: Send + Sync {
 
 pub struct ToolManager {
     plugins: HashMap<String, Box<dyn ToolPlugin>>,
+    shutdown_called: AtomicBool,
 }
 
 impl ToolManager {
@@ -39,11 +43,14 @@ impl ToolManager {
     ) -> Self {
         let mut manager = Self {
             plugins: HashMap::new(),
+            shutdown_called: AtomicBool::new(false),
         };
         manager.register(Box::new(time::TimeTool));
         manager.register(Box::new(http::HttpTool));
         manager.register(Box::new(web::WebBrowserTool));
         manager.register(Box::new(exec::ExecTool));
+        #[cfg(feature = "mobile")]
+        manager.register(Box::new(mobile::MobileTool));
         if let Some(backend) = memory_backend {
             manager.register(Box::new(memory::MemoryTool::new(backend, memory_default_key)));
         }
@@ -63,6 +70,9 @@ impl ToolManager {
     }
 
     pub fn shutdown(&self) {
+        if self.shutdown_called.swap(true, Ordering::AcqRel) {
+            return;
+        }
         for plugin in self.plugins.values() {
             plugin.finit();
         }

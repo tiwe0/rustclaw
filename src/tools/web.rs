@@ -6,6 +6,7 @@ use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::Page;
 use chromiumoxide::page::ScreenshotParams;
 use futures_util::StreamExt;
+use minify_html::{minify, Cfg};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,7 +20,6 @@ use crate::log;
 use crate::tools::{ToolPlugin, truncate_utf8};
 use crate::types::{ToolDefinition, ToolSchema};
 
-const MAX_HTML_PREVIEW: usize = 8000;
 const MAX_TEXT_PREVIEW: usize = 6000;
 const WINDOW_WIDTH: u32 = 1440;
 const WINDOW_HEIGHT: u32 = 900;
@@ -67,7 +67,7 @@ impl ToolPlugin for WebBrowserTool {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "description": "支持: open, close, sessions, goto, scroll, html, content, click, input, screenshot"
+                            "description": "支持: open, close, sessions, goto, scroll, html, minihtml, content, click, input, screenshot"
                         },
                         "session_id": {
                             "type": "string",
@@ -154,7 +154,7 @@ impl ToolPlugin for WebBrowserTool {
             log::warn(format!("[web_browser][execute] unsupported action={}", action));
             return Ok(json!({
                 "ok": false,
-                "error": "action 仅支持 open/close/sessions/goto/scroll/html/content/click/input/screenshot"
+                "error": "action 仅支持 open/close/sessions/goto/scroll/html/minihtml/content/click/input/screenshot"
             }));
         }
 
@@ -652,7 +652,6 @@ async fn run_action_in_session(action: &str, session_id: &str, args: &Value) -> 
             log::debug(format!("[web_browser][action][html] collecting html session_id={}", session_id));
             let title = session.page.get_title().await.unwrap_or_default();
             let html = session.page.content().await.unwrap_or_default();
-            let html_preview = truncate(&html, MAX_HTML_PREVIEW);
             let current_url = session
                 .page
                 .url()
@@ -666,7 +665,28 @@ async fn run_action_in_session(action: &str, session_id: &str, args: &Value) -> 
                 "session_id": session_id,
                 "url": current_url,
                 "title": title,
-                "html": html_preview,
+                "html": html,
+            }))
+        }
+        "minihtml" => {
+            log::debug(format!("[web_browser][action][minihtml] collecting minified html session_id={}", session_id));
+            let title = session.page.get_title().await.unwrap_or_default();
+            let html = session.page.content().await.unwrap_or_default();
+            let html = minify_html_text(&html);
+            let current_url = session
+                .page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            Ok(json!({
+                "ok": true,
+                "action": "minihtml",
+                "session_id": session_id,
+                "url": current_url,
+                "title": title,
+                "html": html,
             }))
         }
         "content" => {
@@ -901,7 +921,7 @@ async fn run_list_sessions() -> Result<Value> {
             .unwrap_or_default();
         sessions.push(json!({
             "session_id": id,
-            "current": current_id.as_deref() == Some(&id),
+            "current": current_id.as_deref() == Some(id.as_str()),
             "url": url,
             "title": title,
         }));
@@ -960,6 +980,16 @@ fn truncate(s: &str, max: usize) -> String {
     truncate_utf8(s, max)
 }
 
+fn minify_html_text(html: &str) -> String {
+    if html.is_empty() {
+        return String::new();
+    }
+
+    let cfg = Cfg::new();
+    let minified = minify(html.as_bytes(), &cfg);
+    String::from_utf8(minified).unwrap_or_else(|_| html.to_string())
+}
+
 fn is_supported_action(action: &str) -> bool {
     matches!(
         action,
@@ -969,6 +999,7 @@ fn is_supported_action(action: &str) -> bool {
             | "goto"
             | "scroll"
             | "html"
+            | "minihtml"
             | "content"
             | "click"
             | "input"
@@ -1093,7 +1124,7 @@ mod tests {
         assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(
             out.get("error").and_then(|v| v.as_str()),
-            Some("action 仅支持 open/close/sessions/goto/scroll/html/content/click/input/screenshot")
+            Some("action 仅支持 open/close/sessions/goto/scroll/html/minihtml/content/click/input/screenshot")
         );
     }
 }
