@@ -24,12 +24,13 @@ use crate::react_agent::{run_react_loop, ReActOptions, ReActStopReason};
 use crate::session::{ChatSession, SessionManager, SessionMeta, session_db_path, session_dir_path};
 use crate::skills::create_skills_backend;
 use crate::tools::ToolManager;
-use crate::types::Message;
+use crate::types::{Message, ToolCall};
 
 const MAX_LINES: usize = 1000;
 const SCROLL_STEP: usize = 8;
 const UI_POLL_MS: u64 = 16;
 const STREAM_FORCE_FLUSH_BYTES: usize = 96;
+const TOOL_ARGS_PREVIEW_CHARS: usize = 180;
 
 fn resolve_child_dir_for_log(app_base_dir: &std::path::Path, raw: &str) -> String {
     let path = std::path::PathBuf::from(raw);
@@ -735,11 +736,16 @@ async fn process_user_turn_async(
                 token: token.to_string(),
             });
         },
-        |tool_count| {
+        |tool_calls| {
+            let tool_details = tool_calls
+                .iter()
+                .map(|call| format_tool_call_for_tui(call, TOOL_ARGS_PREVIEW_CHARS))
+                .collect::<Vec<_>>();
             let _ = tx.send(BackendEvent::CallingTools {
                 session_id: session_id.to_string(),
                 task_id,
-                tool_count,
+                tool_count: tool_calls.len(),
+                tool_details,
             });
         },
     )
@@ -803,6 +809,7 @@ enum BackendEvent {
         session_id: String,
         task_id: u64,
         tool_count: usize,
+        tool_details: Vec<String>,
     },
     Token { session_id: String, task_id: u64, token: String },
     SessionChanged { id: String, title: String },
@@ -1321,11 +1328,15 @@ impl TuiApp {
                 session_id,
                 task_id,
                 tool_count,
+                tool_details,
             } => {
                 self.flush_stream_buffer_for_task(task_id);
                 self.set_assistant_phase(&session_id, AssistantPhase::CallingTools);
                 if self.session_id == session_id {
                     self.push_line(format!("system> 调用工具中（{}）...", tool_count));
+                    for detail in tool_details {
+                        self.push_line(format!("system> tool {}", detail));
+                    }
                 }
             }
             BackendEvent::Token {
@@ -1450,6 +1461,39 @@ fn message_role_color(line: &str, app: &TuiApp, previous: Color) -> Color {
     } else {
         previous
     }
+}
+
+fn format_tool_call_for_tui(call: &ToolCall, args_limit: usize) -> String {
+    let tool_name = if call.function.name.trim().is_empty() {
+        "<unknown>"
+    } else {
+        call.function.name.as_str()
+    };
+    let compact_args = call
+        .function
+        .arguments
+        .replace('\n', " ")
+        .replace('\r', " ");
+    let args_preview = truncate_with_ellipsis(&compact_args, args_limit);
+    format!("{} args={}", tool_name, args_preview)
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return "...".to_string();
+    }
+
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in input.chars() {
+        if count >= max_chars {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    out
 }
 
 fn cancel_task_by_id(

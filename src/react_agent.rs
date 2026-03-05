@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::model::ChatModel;
 use crate::tools::ToolManager;
-use crate::types::{AssistantReply, Message};
+use crate::types::{AssistantReply, Message, ToolCall};
 
 const DEFAULT_STOP_MARKER: &str = "[[REACT_STOP]]";
 
@@ -70,7 +70,7 @@ pub async fn run_react_loop<FStart, FToken, FTool>(
 where
     FStart: FnMut(usize),
     FToken: FnMut(&str) + Send,
-    FTool: FnMut(usize),
+    FTool: FnMut(&[ToolCall]),
 {
     let options = options.normalized();
     let tools = tool_manager.definitions();
@@ -118,7 +118,7 @@ where
             });
         }
 
-        on_tool_calls_started(tool_calls.len());
+        on_tool_calls_started(&tool_calls);
         let tool_messages = tool_manager
             .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1))
             .await?;

@@ -13,8 +13,8 @@ stream = true
 name = "deepseek-chat"
 api_key = "sk-xxxx"
 base_url = "https://api.deepseek.com"
-max_token = 0
-window_size = 0
+max_token = 8192
+window_size = 200000
 
 [memory]
 enabled = true
@@ -29,7 +29,7 @@ base_dir = "skills"
 default_skill = "default"
 
 [agent]
-react_max_loops = 8
+react_max_loops = 16
 react_stop_marker = "[[REACT_STOP]]"
 
 [channel]
