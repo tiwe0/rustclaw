@@ -11,6 +11,8 @@ pub struct ReActOptions {
     pub stream_enabled: bool,
     pub max_loops: usize,
     pub stop_marker: String,
+    pub max_message_chars: usize,
+    pub window_size_chars: usize,
 }
 
 impl ReActOptions {
@@ -25,6 +27,8 @@ impl ReActOptions {
             stream_enabled: self.stream_enabled,
             max_loops,
             stop_marker,
+            max_message_chars: self.max_message_chars,
+            window_size_chars: self.window_size_chars,
         }
     }
 }
@@ -35,6 +39,8 @@ impl Default for ReActOptions {
             stream_enabled: true,
             max_loops: 8,
             stop_marker: DEFAULT_STOP_MARKER.to_string(),
+            max_message_chars: 0,
+            window_size_chars: 0,
         }
     }
 }
@@ -77,6 +83,8 @@ where
             messages,
             &tools,
             options.stream_enabled,
+            options.max_message_chars,
+            options.window_size_chars,
             &mut on_token,
         )
         .await?;
@@ -136,29 +144,209 @@ async fn request_assistant<FToken>(
     messages: &[Message],
     tools: &[crate::types::ToolDefinition],
     stream_enabled: bool,
+    max_message_chars: usize,
+    window_size_chars: usize,
     on_token: &mut FToken,
 ) -> Result<AssistantReply>
 where
     FToken: FnMut(&str) + Send,
 {
+    let request_messages = build_request_messages(
+        messages,
+        max_message_chars,
+        window_size_chars,
+    );
     if stream_enabled {
         let mut forward_token = |token: &str| {
             on_token(token);
         };
         let streamed = client
-            .stream_chat_collect(messages, Some(tools), &mut forward_token)
+            .stream_chat_collect(&request_messages, Some(tools), &mut forward_token)
             .await?;
         Ok(AssistantReply {
             content: streamed.content,
             tool_calls: streamed.tool_calls,
         })
     } else {
-        let reply = client.chat_once(messages, Some(tools)).await?;
+        let reply = client.chat_once(&request_messages, Some(tools)).await?;
         if let Some(text) = &reply.content {
             on_token(text);
         }
         Ok(reply)
     }
+}
+
+fn build_request_messages(
+    messages: &[Message],
+    max_message_chars: usize,
+    window_size_chars: usize,
+) -> Vec<Message> {
+    let mut expanded = Vec::new();
+    for message in messages {
+        expanded.extend(split_message_if_needed(message, max_message_chars));
+    }
+
+    apply_window_size(expanded, window_size_chars)
+}
+
+fn split_message_if_needed(message: &Message, max_message_chars: usize) -> Vec<Message> {
+    if max_message_chars == 0 {
+        return vec![message.clone()];
+    }
+
+    let Some(content) = &message.content else {
+        return vec![message.clone()];
+    };
+
+    if content.chars().count() <= max_message_chars {
+        return vec![message.clone()];
+    }
+
+    match message.role.as_str() {
+        "user" => split_user_message(message, max_message_chars),
+        "tool" => split_tool_message_to_user_messages(message, max_message_chars),
+        _ => vec![message.clone()],
+    }
+}
+
+fn split_user_message(message: &Message, max_message_chars: usize) -> Vec<Message> {
+    let Some(content) = &message.content else {
+        return vec![message.clone()];
+    };
+
+    split_text_chunks(content, max_message_chars)
+        .into_iter()
+        .map(|chunk| Message {
+            role: "user".to_string(),
+            content: Some(chunk),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        })
+        .collect()
+}
+
+fn split_tool_message_to_user_messages(message: &Message, max_message_chars: usize) -> Vec<Message> {
+    let Some(content) = &message.content else {
+        return vec![message.clone()];
+    };
+
+    let tool_name = message
+        .name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("tool");
+    let chunks = split_text_chunks(content, max_message_chars);
+    let total = chunks.len();
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(idx, chunk)| Message {
+            role: "user".to_string(),
+            content: Some(format!(
+                "[functioncall:{} part {}/{}]\n{}",
+                tool_name,
+                idx + 1,
+                total,
+                chunk
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        })
+        .collect()
+}
+
+fn split_text_chunks(text: &str, max_message_chars: usize) -> Vec<String> {
+    if max_message_chars == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for ch in text.chars() {
+        if current_len >= max_message_chars {
+            chunks.push(current);
+            current = String::new();
+            current_len = 0;
+        }
+        current.push(ch);
+        current_len += 1;
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+
+    chunks
+}
+
+fn apply_window_size(messages: Vec<Message>, window_size_chars: usize) -> Vec<Message> {
+    if window_size_chars == 0 {
+        return messages;
+    }
+
+    let mut keep_non_system = vec![false; messages.len()];
+    let mut used = 0usize;
+    let mut kept_any = false;
+
+    for idx in (0..messages.len()).rev() {
+        if messages[idx].role == "system" {
+            continue;
+        }
+
+        let current_len = message_text_len(&messages[idx]);
+        if used + current_len <= window_size_chars || !kept_any {
+            keep_non_system[idx] = true;
+            used = used.saturating_add(current_len);
+            kept_any = true;
+        } else {
+            break;
+        }
+    }
+
+    messages
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, message)| {
+            if message.role == "system" || keep_non_system[idx] {
+                Some(message)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn message_text_len(message: &Message) -> usize {
+    let mut total = 0usize;
+
+    if let Some(content) = &message.content {
+        total = total.saturating_add(content.chars().count());
+    }
+
+    if let Some(tool_calls) = &message.tool_calls {
+        for call in tool_calls {
+            total = total.saturating_add(call.function.name.chars().count());
+            total = total.saturating_add(call.function.arguments.chars().count());
+        }
+    }
+
+    if let Some(id) = &message.tool_call_id {
+        total = total.saturating_add(id.chars().count());
+    }
+    if let Some(name) = &message.name {
+        total = total.saturating_add(name.chars().count());
+    }
+
+    total
 }
 
 fn strip_stop_marker(content: Option<String>, stop_marker: &str) -> (Option<String>, bool) {

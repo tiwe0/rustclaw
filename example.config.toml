@@ -13,6 +13,8 @@ stream = true
 name = "deepseek-chat"
 api_key = "sk-xxxx"
 base_url = "https://api.deepseek.com"
+max_token = 0
+window_size = 0
 
 [memory]
 enabled = true

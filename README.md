@@ -34,6 +34,8 @@ backend = "deepseek"
 stream = true
 name = "deepseek-chat"
 api_key = "YOUR_DEEPSEEK_API_KEY"
+max_token = 0
+window_size = 0
 # base_url = "https://api.deepseek.com"
 
 [base]
@@ -90,6 +92,8 @@ system_msg_color = "yellow"
 - `name`：模型名称
 - `api_key`：模型 key
 - `base_url`：可选，覆盖后端默认地址
+- `max_token`：单条 user/functioncall 消息最大长度（按字符数，`0` 表示不拆分）
+- `window_size`：发送给模型的历史消息窗口上限（按字符总数，`0` 表示不裁剪）
 
 `[base]` 字段说明：
 - `base_dir`：全局数据根目录（默认 `~/.rustclaw`），其余模块的 `base_dir` 均基于该目录解析
@@ -108,6 +112,8 @@ backend = "openai"
 stream = true
 name = "gpt-4o-mini"
 api_key = "YOUR_OPENAI_API_KEY"
+max_token = 0
+window_size = 0
 # base_url = "https://api.openai.com"
 ```
 

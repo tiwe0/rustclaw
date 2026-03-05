@@ -40,6 +40,10 @@ pub struct ModelConfig {
     pub name: String,
     pub api_key: String,
     pub base_url: Option<String>,
+    #[serde(default = "default_model_max_token", alias = "maxToken")]
+    pub max_token: usize,
+    #[serde(default = "default_model_window_size", alias = "windowSize")]
+    pub window_size: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -233,6 +237,14 @@ impl Default for TuiConfig {
 
 fn default_memory_enabled() -> bool {
     false
+}
+
+fn default_model_max_token() -> usize {
+    0
+}
+
+fn default_model_window_size() -> usize {
+    0
 }
 
 fn default_base_base_dir() -> String {
