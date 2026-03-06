@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::config::{load_config, resolve_app_base_dir, resolve_config_path};
+use crate::interrupt;
 use crate::log;
 use crate::memory::create_memory_backend;
 use crate::model::{ChatModel, create_model_provider};
@@ -249,6 +250,10 @@ where
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let _cancel_token = session_key
+        .as_deref()
+        .filter(|sid| !sid.eq_ignore_ascii_case("new"))
+        .map(interrupt::session_token);
 
     let mut transient_session_id: Option<String> = None;
 
@@ -302,21 +307,50 @@ where
             max_message_chars: model_config.max_token,
             window_size_chars: model_config.window_size,
         },
+        || {
+            session_key
+                .as_deref()
+                .is_some_and(interrupt::is_cancelled)
+        },
         |loop_idx| {
-            on_assistant_started(loop_idx);
+            if !session_key
+                .as_deref()
+                .is_some_and(interrupt::is_cancelled)
+            {
+                on_assistant_started(loop_idx);
+            }
         },
         |token| {
-            on_token(token);
+            if !session_key
+                .as_deref()
+                .is_some_and(interrupt::is_cancelled)
+            {
+                on_token(token);
+            }
         },
         |tool_calls| {
-            on_tool_calls_started(tool_calls);
+            if !session_key
+                .as_deref()
+                .is_some_and(interrupt::is_cancelled)
+            {
+                on_tool_calls_started(tool_calls);
+            }
         },
         |tool_messages| {
-            on_tool_results(tool_messages);
+            if !session_key
+                .as_deref()
+                .is_some_and(interrupt::is_cancelled)
+            {
+                on_tool_results(tool_messages);
+            }
         },
     )
     .await;
     tool_manager.shutdown();
+
+    if let Some(key) = session_key.as_deref() {
+        interrupt::clear_session(key);
+    }
     let summary = summary_result?;
 
     if let Some(ref key) = session_key {
@@ -347,6 +381,11 @@ where
             "[ReAct] 达到最大循环次数 {}，已强制停止。",
             summary.loops_used
         ));
+    } else if matches!(summary.stop_reason, ReActStopReason::Interrupted) {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str("[ReAct] 会话已中断。");
     }
 
     Ok(output)
@@ -809,8 +848,9 @@ async fn process_user_turn_async(
     react_stop_marker: String,
     tx: mpsc::UnboundedSender<BackendEvent>,
 ) -> Result<()> {
+    let _cancel_token = interrupt::session_token(session_id);
     let mut working_session = session_manager.load_session(session_id)?;
-    let summary = run_react_loop(
+    let summary_result = run_react_loop(
         client,
         tool_manager,
         &mut working_session.messages,
@@ -828,7 +868,11 @@ async fn process_user_turn_async(
             max_message_chars,
             window_size_chars,
         },
+        || interrupt::is_cancelled(session_id),
         |loop_idx| {
+            if interrupt::is_cancelled(session_id) {
+                return;
+            }
             let _ = tx.send(if loop_idx == 1 {
                 BackendEvent::AssistantStarted {
                     session_id: session_id.to_string(),
@@ -842,6 +886,9 @@ async fn process_user_turn_async(
             });
         },
         |token| {
+            if interrupt::is_cancelled(session_id) {
+                return;
+            }
             let _ = tx.send(BackendEvent::Token {
                 session_id: session_id.to_string(),
                 task_id,
@@ -849,6 +896,9 @@ async fn process_user_turn_async(
             });
         },
         |tool_calls| {
+            if interrupt::is_cancelled(session_id) {
+                return;
+            }
             let tool_details = tool_calls
                 .iter()
                 .map(|call| format_tool_call_for_tui(call, TOOL_ARGS_PREVIEW_CHARS))
@@ -862,7 +912,11 @@ async fn process_user_turn_async(
         },
         |_| {},
     )
-    .await?;
+    .await;
+    if summary_result.is_err() {
+        interrupt::clear_session(session_id);
+    }
+    let summary = summary_result?;
 
     match summary.stop_reason {
         ReActStopReason::ModelRequestedStop => {
@@ -884,6 +938,15 @@ async fn process_user_turn_async(
             });
         }
         ReActStopReason::AssistantFinished => {}
+        ReActStopReason::Interrupted => {
+            let _ = tx.send(BackendEvent::TaskCanceled {
+                session_id: session_id.to_string(),
+                task_id,
+                reason: "会话已关闭，任务中断".to_string(),
+            });
+            interrupt::clear_session(session_id);
+            return Ok(());
+        }
     }
 
     let mut latest = session_manager.load_session(session_id)?;
@@ -897,6 +960,7 @@ async fn process_user_turn_async(
         session_id: session_id.to_string(),
         task_id,
     });
+    interrupt::clear_session(session_id);
     Ok(())
 }
 

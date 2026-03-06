@@ -52,6 +52,7 @@ pub enum ReActStopReason {
     AssistantFinished,
     ModelRequestedStop,
     MaxLoopsReached,
+    Interrupted,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +75,7 @@ pub async fn run_react_loop<FStart, FToken, FTool, FToolResult>(
     mut session_provider: impl FnMut() -> Option<SessionLoadedState>,
     session_id: Option<&str>,
     options: ReActOptions,
+    mut should_interrupt: impl FnMut() -> bool,
     mut on_assistant_started: FStart,
     mut on_token: FToken,
     mut on_tool_calls_started: FTool,
@@ -89,6 +91,13 @@ where
     let tools = tool_manager.definitions();
 
     for loop_idx in 0..options.max_loops {
+        if should_interrupt() {
+            return Ok(ReActSummary {
+                loops_used: loop_idx,
+                stop_reason: ReActStopReason::Interrupted,
+            });
+        }
+
         on_assistant_started(loop_idx + 1);
 
         let current_session_state = session_provider();
@@ -104,6 +113,13 @@ where
             &mut on_token,
         )
         .await?;
+
+        if should_interrupt() {
+            return Ok(ReActSummary {
+                loops_used: loop_idx + 1,
+                stop_reason: ReActStopReason::Interrupted,
+            });
+        }
 
         let (content, stopped_by_marker) = strip_stop_marker(reply.content, &options.stop_marker);
         let tool_calls = reply.tool_calls;
@@ -134,10 +150,25 @@ where
             });
         }
 
+        if should_interrupt() {
+            return Ok(ReActSummary {
+                loops_used: loop_idx + 1,
+                stop_reason: ReActStopReason::Interrupted,
+            });
+        }
+
         on_tool_calls_started(&tool_calls);
         let tool_messages = tool_manager
             .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1), session_id)
             .await?;
+
+        if should_interrupt() {
+            return Ok(ReActSummary {
+                loops_used: loop_idx + 1,
+                stop_reason: ReActStopReason::Interrupted,
+            });
+        }
+
         on_tool_results(&tool_messages);
         messages.extend(tool_messages);
     }

@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::interrupt;
 use crate::types::Message;
 
 const SESSION_DIR_NAME: &str = ".sessions";
@@ -195,6 +196,8 @@ impl SessionManager {
         if normalized_id.is_empty() {
             return Ok(());
         }
+
+        interrupt::cancel_session(&normalized_id);
 
         let mut locked = self.inner.lock().map_err(|_| anyhow::anyhow!("session lock poisoned"))?;
         locked.sessions.remove(&normalized_id);

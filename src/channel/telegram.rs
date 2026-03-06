@@ -8,6 +8,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::app;
 use crate::config::TelegramChannelConfig;
+use crate::interrupt;
 use crate::types::{Message as ChatMessage, ToolCall};
 
 const TELEGRAM_TEXT_LIMIT: usize = 3900;
@@ -103,6 +104,7 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
     let chat_id = msg.chat.id;
     let message_id = msg.id;
     let thread_id = msg.thread_id;
+    let telegram_session_id = format!("telegram_{}", chat_id.0);
 
     if let Some(limit_chat_id) = cfg.chat_id
         && chat_id.0 != limit_chat_id
@@ -131,10 +133,31 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         return Ok(());
     }
 
+    if user_input.eq_ignore_ascii_case("/interrupt")
+        || user_input.eq_ignore_ascii_case("/cancel")
+        || user_input.eq_ignore_ascii_case("/stop")
+    {
+        interrupt::cancel_session(&telegram_session_id);
+        let _ = send_message_in_context(
+            &bot,
+            chat_id,
+            thread_id,
+            Some(message_id),
+            "已中断当前对话。".to_string(),
+        )
+        .await;
+        println!(
+            "[channel/telegram] interrupt requested: chat_id={} session_id={}",
+            chat_id.0, telegram_session_id
+        );
+        return Ok(());
+    }
+
     println!(
-        "[channel/telegram] incoming text: chat_id={} message_id={} preview={}",
+        "[channel/telegram] incoming text: chat_id={} message_id={} session_id={} preview={}",
         chat_id.0,
         message_id.0,
+        telegram_session_id,
         preview_input(user_input)
     );
 
@@ -148,7 +171,7 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
 
         app::call_once_react_with_session(
             &input_owned,
-            None,
+            Some(&telegram_session_id),
             move |loop_idx| {
                 let _ = tx_for_start.send(TelegramReactEvent::AssistantStarted { loop_idx });
             },

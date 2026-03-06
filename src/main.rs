@@ -7,6 +7,7 @@ mod channel;
 mod conversation;
 mod config;
 mod cron;
+mod interrupt;
 mod log;
 mod memory;
 mod model;
