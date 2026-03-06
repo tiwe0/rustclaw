@@ -189,6 +189,33 @@ pub async fn call_once_stream_with_session<F>(
 where
     F: FnMut(&str) + Send,
 {
+    call_once_react_with_session(
+        user_input,
+        session,
+        |_| {},
+        |token| {
+            on_token(token);
+        },
+        |_| {},
+        |_| {},
+    )
+    .await
+}
+
+pub async fn call_once_react_with_session<FStart, FToken, FTool, FToolResult>(
+    user_input: &str,
+    session: Option<&str>,
+    mut on_assistant_started: FStart,
+    mut on_token: FToken,
+    mut on_tool_calls_started: FTool,
+    mut on_tool_results: FToolResult,
+) -> Result<String>
+where
+    FStart: FnMut(usize),
+    FToken: FnMut(&str) + Send,
+    FTool: FnMut(&[ToolCall]),
+    FToolResult: FnMut(&[Message]),
+{
     let config_path = resolve_config_path();
     let config = load_config(&config_path)?;
     let model_config = config.model;
@@ -275,11 +302,18 @@ where
             max_message_chars: model_config.max_token,
             window_size_chars: model_config.window_size,
         },
-        |_| {},
+        |loop_idx| {
+            on_assistant_started(loop_idx);
+        },
         |token| {
             on_token(token);
         },
-        |_| {},
+        |tool_calls| {
+            on_tool_calls_started(tool_calls);
+        },
+        |tool_messages| {
+            on_tool_results(tool_messages);
+        },
     )
     .await;
     tool_manager.shutdown();
@@ -826,6 +860,7 @@ async fn process_user_turn_async(
                 tool_details,
             });
         },
+        |_| {},
     )
     .await?;
 

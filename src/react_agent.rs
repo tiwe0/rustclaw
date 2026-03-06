@@ -67,7 +67,7 @@ pub struct SessionLoadedState {
     pub tools_loaded: ToolsLoaded,
 }
 
-pub async fn run_react_loop<FStart, FToken, FTool>(
+pub async fn run_react_loop<FStart, FToken, FTool, FToolResult>(
     client: &dyn ChatModel,
     tool_manager: &ToolManager,
     messages: &mut Vec<Message>,
@@ -77,11 +77,13 @@ pub async fn run_react_loop<FStart, FToken, FTool>(
     mut on_assistant_started: FStart,
     mut on_token: FToken,
     mut on_tool_calls_started: FTool,
+    mut on_tool_results: FToolResult,
 ) -> Result<ReActSummary>
 where
     FStart: FnMut(usize),
     FToken: FnMut(&str) + Send,
     FTool: FnMut(&[ToolCall]),
+    FToolResult: FnMut(&[Message]),
 {
     let options = options.normalized();
     let tools = tool_manager.definitions();
@@ -136,6 +138,7 @@ where
         let tool_messages = tool_manager
             .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1), session_id)
             .await?;
+        on_tool_results(&tool_messages);
         messages.extend(tool_messages);
     }
 

@@ -9,11 +9,28 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use std::sync::Arc;
+use std::sync::OnceLock;
+use tokio::sync::broadcast;
 
 use crate::app;
 use crate::config::{load_config, resolve_app_base_dir, resolve_config_path};
 use crate::log;
 use crate::session::{session_db_path, session_dir_path};
+
+#[derive(Debug, Clone, Copy)]
+enum CronControlEvent {
+    ReloadJobs,
+}
+
+static CRON_CONTROL_TX: OnceLock<broadcast::Sender<CronControlEvent>> = OnceLock::new();
+
+pub fn notify_jobs_updated() -> bool {
+    if let Some(tx) = CRON_CONTROL_TX.get() {
+        tx.send(CronControlEvent::ReloadJobs).is_ok()
+    } else {
+        false
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CronJob {
@@ -151,6 +168,33 @@ impl CronJobManager {
             state.running = false;
         }
     }
+
+    pub fn reload_jobs(&mut self, jobs: Vec<CronJob>) {
+        let mut next = HashMap::new();
+
+        for job in jobs {
+            if job.name.is_empty() {
+                continue;
+            }
+
+            let (last_trigger_slot, running) = self
+                .jobs
+                .get(&job.name)
+                .map(|state| (state.last_trigger_slot, state.running))
+                .unwrap_or((None, false));
+
+            next.insert(
+                job.name.clone(),
+                CronJobState {
+                    job,
+                    last_trigger_slot,
+                    running,
+                },
+            );
+        }
+
+        self.jobs = next;
+    }
 }
 
 pub async fn run() -> Result<()> {
@@ -181,6 +225,13 @@ pub async fn run() -> Result<()> {
         log::info("  - log.file: <disabled>");
     }
     let jobs = load_jobs_from_file(&jobs_file)?;
+    let control_tx = CRON_CONTROL_TX
+        .get_or_init(|| {
+            let (tx, _) = broadcast::channel(32);
+            tx
+        })
+        .clone();
+    let mut control_rx = control_tx.subscribe();
 
     let manager = Arc::new(Mutex::new(CronJobManager::from_jobs(jobs)));
 
@@ -202,6 +253,34 @@ pub async fn run() -> Result<()> {
     }
 
     loop {
+        loop {
+            match control_rx.try_recv() {
+                Ok(CronControlEvent::ReloadJobs) => {
+                    match load_jobs_from_file(&jobs_file) {
+                        Ok(reloaded_jobs) => {
+                            let mut locked = manager.lock().await;
+                            locked.reload_jobs(reloaded_jobs);
+                            let snapshot = locked.list();
+                            log::info(format!(
+                                "[cron] jobs reloaded via cron tool: jobs={} (enabled={})",
+                                snapshot.len(),
+                                snapshot.iter().filter(|j| j.enabled).count()
+                            ));
+                        }
+                        Err(err) => {
+                            log::error(format!(
+                                "[cron] failed to reload jobs after tool update: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+
         let due_jobs = {
             let mut locked = manager.lock().await;
             locked.collect_due_jobs(Local::now())

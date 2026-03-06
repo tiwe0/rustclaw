@@ -191,6 +191,144 @@ enabled = false
 - `minute/hour/day/month/weekday`：类 Linux cron 字段（支持 `*`、`*/n`、`a,b,c`、`a-b`，weekday 支持 `mon..sun`）
 - `enabled`：是否启用该 job
 
+## cron_job_manager 工具
+
+工具名：`cron_job_manager`
+
+用途：在对话中直接管理 rustclaw 内置 cron job（读写 `[cron].jobs_file` 对应的 TOML 文件）。
+
+同步行为：`upsert/delete/enable/disable` 在写入本地文件后，会尝试通知当前进程内的 cron 调度器刷新内存任务表。
+
+支持动作：
+- `list`：列出当前所有 job
+- `upsert`：新增或更新 job
+- `delete`：删除 job
+- `enable`：启用 job
+- `disable`：停用 job
+
+参数说明：
+- `action`：必填，动作类型
+- `name`：除 `list` 外通常必填
+- `session`：`upsert` 可选，默认 `new`
+- `prompt`：`upsert` 新建时必填，更新时可选
+- `minute/hour/day/month/weekday`：`upsert` 可选，默认沿用旧值（新建时默认 `*`）
+- `enabled`：`upsert` 可选，显式设置启停状态
+
+字段校验：
+- cron 字段支持 `*`、`*/n`、`a,b,c`、`a-b`
+- `weekday` 支持数字 `0..7`（`7` 视作 `0`）与 `mon..sun`
+
+示例（可直接给模型 function call）：
+
+1) 列出当前 job
+
+```json
+{
+	"name": "cron_job_manager",
+	"arguments": {
+		"action": "list"
+	}
+}
+```
+
+## awareness 工具
+
+工具名：`awareness`
+
+用途：供 LLM agent 获取和同步“自我认知”文本，默认持久化到 `[base].base_dir/awareness.md`。
+
+支持动作：
+- `get`：读取当前自我认知
+- `sync`：同步更新自我认知
+
+参数说明：
+- `action`：必填，`get` 或 `sync`
+- `content`：`sync` 时必填
+- `mode`：`sync` 写入模式，可选 `replace`（默认）或 `append`
+
+示例：
+
+1) 获取当前自我认知
+
+```json
+{
+	"name": "awareness",
+	"arguments": {
+		"action": "get"
+	}
+}
+```
+
+2) 覆盖同步为最新认知
+
+```json
+{
+	"name": "awareness",
+	"arguments": {
+		"action": "sync",
+		"mode": "replace",
+		"content": "我是 RustClaw 的代理，优先使用工具完成任务并在失败时给出替代方案。"
+	}
+}
+```
+
+3) 追加一条新认知
+
+```json
+{
+	"name": "awareness",
+	"arguments": {
+		"action": "sync",
+		"mode": "append",
+		"content": "当用户要求代码修改时，应先实施并验证，而不是只给方案。"
+	}
+}
+```
+
+2) 新增一个每 30 分钟触发的 job
+
+```json
+{
+	"name": "cron_job_manager",
+	"arguments": {
+		"action": "upsert",
+		"name": "dependency_check",
+		"session": "ops_agent",
+		"prompt": "请给出当前项目依赖安全检查建议清单。",
+		"minute": "*/30",
+		"hour": "*",
+		"day": "*",
+		"month": "*",
+		"weekday": "mon-fri",
+		"enabled": true
+	}
+}
+```
+
+3) 停用某个 job
+
+```json
+{
+	"name": "cron_job_manager",
+	"arguments": {
+		"action": "disable",
+		"name": "dependency_check"
+	}
+}
+```
+
+4) 删除某个 job
+
+```json
+{
+	"name": "cron_job_manager",
+	"arguments": {
+		"action": "delete",
+		"name": "dependency_check"
+	}
+}
+```
+
 ## ReAct system prompt 模板
 
 默认会根据 `react_stop_marker` 自动生成系统提示词模板。你也可以参考下面模板自定义：

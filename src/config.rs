@@ -118,6 +118,8 @@ pub struct TelegramChannelConfig {
     pub long_poll_timeout_secs: u64,
     #[serde(default = "default_telegram_api_base_url")]
     pub api_base_url: String,
+    #[serde(default = "default_telegram_verbose_tool_messages")]
+    pub verbose_tool_messages: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -210,6 +212,7 @@ impl Default for TelegramChannelConfig {
             poll_interval_ms: default_telegram_poll_interval_ms(),
             long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
             api_base_url: default_telegram_api_base_url(),
+            verbose_tool_messages: default_telegram_verbose_tool_messages(),
         }
     }
 }
@@ -325,6 +328,10 @@ fn default_telegram_long_poll_timeout_secs() -> u64 {
 
 fn default_telegram_api_base_url() -> String {
     "https://api.telegram.org".to_string()
+}
+
+fn default_telegram_verbose_tool_messages() -> bool {
+    true
 }
 
 fn default_cron_enabled() -> bool {

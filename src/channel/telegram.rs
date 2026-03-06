@@ -8,11 +8,21 @@ use tokio::time::{Duration, Instant};
 
 use crate::app;
 use crate::config::TelegramChannelConfig;
+use crate::types::{Message as ChatMessage, ToolCall};
 
 const TELEGRAM_TEXT_LIMIT: usize = 3900;
 const STREAM_EDIT_INTERVAL_MS: u64 = 700;
 const TELEGRAM_DEFAULT_API_BASE_URL: &str = "https://api.telegram.org";
 const INPUT_PREVIEW_CHARS: usize = 80;
+const TOOL_ARGS_PREVIEW_CHARS: usize = 200;
+const REACT_STOP_MARKER: &str = "[[REACT_STOP]]";
+
+enum TelegramReactEvent {
+    AssistantStarted { loop_idx: usize },
+    Token(String),
+    ToolCallsStarted(Vec<ToolCall>),
+    ToolResults(Vec<ChatMessage>),
+}
 
 pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
     if cfg.bot_token.trim().is_empty() {
@@ -33,6 +43,10 @@ pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
         cfg.chat_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "<disabled>".to_string())
+    );
+    println!(
+        "[channel/telegram] verbose_tool_messages: {}",
+        cfg.verbose_tool_messages
     );
 
     let bot = build_bot(&cfg)?;
@@ -124,178 +138,302 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         preview_input(user_input)
     );
 
-    let sent = send_message_in_context(
-        &bot,
-        chat_id,
-        thread_id,
-        Some(message_id),
-        "思考中...".to_string(),
-    )
-    .await
-    .context("发送占位消息失败")?;
-
-    let placeholder_id = sent.id;
-    println!(
-        "[channel/telegram] placeholder sent: chat_id={} message_id={}",
-        chat_id.0, placeholder_id.0
-    );
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<TelegramReactEvent>();
     let input_owned = user_input.to_string();
     let generation_task = tokio::spawn(async move {
-        app::call_once_stream_with_session(&input_owned, None, move |token| {
-            let _ = tx.send(token.to_string());
-        })
+        let tx_for_start = event_tx.clone();
+        let tx_for_token = event_tx.clone();
+        let tx_for_tools = event_tx.clone();
+        let tx_for_results = event_tx.clone();
+
+        app::call_once_react_with_session(
+            &input_owned,
+            None,
+            move |loop_idx| {
+                let _ = tx_for_start.send(TelegramReactEvent::AssistantStarted { loop_idx });
+            },
+            move |token| {
+                let _ = tx_for_token.send(TelegramReactEvent::Token(token.to_string()));
+            },
+            move |tool_calls| {
+                let _ = tx_for_tools.send(TelegramReactEvent::ToolCallsStarted(tool_calls.to_vec()));
+            },
+            move |tool_messages| {
+                let _ = tx_for_results.send(TelegramReactEvent::ToolResults(tool_messages.to_vec()));
+            },
+        )
         .await
     });
 
-    let mut streamed = String::new();
+    let mut current_streamed = String::new();
+    let mut current_placeholder_id: Option<MessageId> = None;
+    let mut current_loop_idx: usize = 0;
     let mut last_edit = Instant::now();
     let mut edit_count = 0usize;
     let mut streamed_tokens = 0usize;
 
-    while let Some(token) = rx.recv().await {
-        streamed_tokens += 1;
-        streamed.push_str(&token);
-        if last_edit.elapsed() >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
-            let preview = preview_for_telegram(&streamed);
-            match try_edit_message(&bot, chat_id, placeholder_id, &preview).await {
-                Ok(true) => {
-                    edit_count += 1;
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            TelegramReactEvent::AssistantStarted { loop_idx } => {
+                if let Some(placeholder_id) = current_placeholder_id {
+                    finalize_assistant_message(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        Some(message_id),
+                        placeholder_id,
+                        &current_streamed,
+                    )
+                    .await?;
                 }
-                Ok(false) => {}
-                Err(err) => {
-                    eprintln!(
-                        "[channel/telegram] stream edit failed: chat_id={} placeholder_id={} err={}",
+
+                current_loop_idx = loop_idx;
+                current_streamed.clear();
+                last_edit = Instant::now();
+                let sent = send_message_in_context(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    Some(message_id),
+                    format!("🤖 第{}轮思考中...", loop_idx),
+                )
+                .await
+                .context("发送 assistant 占位消息失败")?;
+                current_placeholder_id = Some(sent.id);
+                println!(
+                    "[channel/telegram] assistant placeholder sent: loop={} chat_id={} message_id={}",
+                    loop_idx,
+                    chat_id.0,
+                    sent.id.0
+                );
+            }
+            TelegramReactEvent::Token(token) => {
+                streamed_tokens += 1;
+                current_streamed.push_str(&token);
+                if last_edit.elapsed() >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS)
+                    && let Some(placeholder_id) = current_placeholder_id
+                {
+                    let preview = preview_for_telegram(&current_streamed);
+                    match try_edit_message(&bot, chat_id, placeholder_id, &preview).await {
+                        Ok(true) => {
+                            edit_count += 1;
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            eprintln!(
+                                "[channel/telegram] stream edit failed: loop={} chat_id={} placeholder_id={} err={}",
+                                current_loop_idx,
+                                chat_id.0,
+                                placeholder_id.0,
+                                err
+                            );
+                        }
+                    }
+                    last_edit = Instant::now();
+                }
+            }
+            TelegramReactEvent::ToolCallsStarted(tool_calls) => {
+                println!(
+                    "[channel/telegram] tool_calls_started: chat_id={} count={}",
+                    chat_id.0,
+                    tool_calls.len()
+                );
+                for call in &tool_calls {
+                    println!(
+                        "[channel/telegram] tool_call: name={} id={} args_preview={}",
+                        call.function.name,
+                        call.id,
+                        preview_chars(&call.function.arguments, TOOL_ARGS_PREVIEW_CHARS)
+                    );
+                }
+                if cfg.verbose_tool_messages {
+                    let tool_text = format_tool_calls_for_telegram(&tool_calls);
+                    let _ = send_message_in_context(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        Some(message_id),
+                        tool_text,
+                    )
+                    .await
+                    .context("发送 function call 通知失败")?;
+                    println!(
+                        "[channel/telegram] tool_calls_notice_sent: chat_id={} count={}",
                         chat_id.0,
-                        placeholder_id.0,
-                        err
+                        tool_calls.len()
+                    );
+                } else {
+                    println!(
+                        "[channel/telegram] tool_calls_notice_skipped: verbose_tool_messages=false"
                     );
                 }
             }
-            last_edit = Instant::now();
+            TelegramReactEvent::ToolResults(tool_messages) => {
+                println!(
+                    "[channel/telegram] tool_results_ready: chat_id={} count={}",
+                    chat_id.0,
+                    tool_messages.len()
+                );
+                for tool_msg in &tool_messages {
+                    let tool_name = tool_msg.name.as_deref().unwrap_or("unknown_tool");
+                    let call_id = tool_msg.tool_call_id.as_deref().unwrap_or("unknown_call");
+                    let preview = preview_chars(
+                        tool_msg.content.as_deref().unwrap_or(""),
+                        180,
+                    );
+                    println!(
+                        "[channel/telegram] tool_result: tool={} call_id={} preview={}",
+                        tool_name,
+                        call_id,
+                        preview
+                    );
+                }
+                if cfg.verbose_tool_messages {
+                    for tool_msg in &tool_messages {
+                        let text = format_tool_result_for_telegram(tool_msg);
+                        let _ = send_message_in_context(
+                            &bot,
+                            chat_id,
+                            thread_id,
+                            Some(message_id),
+                            text,
+                        )
+                        .await
+                        .context("发送 function call 结果失败")?;
+                    }
+                    println!(
+                        "[channel/telegram] tool_results_messages_sent: chat_id={} count={}",
+                        chat_id.0,
+                        tool_messages.len()
+                    );
+                } else {
+                    println!(
+                        "[channel/telegram] tool_results_messages_skipped: verbose_tool_messages=false"
+                    );
+                }
+            }
         }
     }
 
+    if let Some(placeholder_id) = current_placeholder_id {
+        finalize_assistant_message(
+            &bot,
+            chat_id,
+            thread_id,
+            Some(message_id),
+            placeholder_id,
+            &current_streamed,
+        )
+        .await?;
+    }
+
     println!(
-        "[channel/telegram] stream done: chat_id={} placeholder_id={} tokens={} chars={} edits={}",
+        "[channel/telegram] stream done: chat_id={} loops={} tokens={} chars={} edits={}",
         chat_id.0,
-        placeholder_id.0,
+        current_loop_idx,
         streamed_tokens,
-        streamed.chars().count(),
+        current_streamed.chars().count(),
         edit_count
     );
 
-    let final_output = match generation_task.await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => format!("处理消息失败: {}", err),
-        Err(err) => format!("处理消息失败: 任务异常: {}", err),
-    };
-
-    println!(
-        "[channel/telegram] finalizing reply: chat_id={} placeholder_id={} chars={}",
-        chat_id.0,
-        placeholder_id.0,
-        final_output.chars().count()
-    );
-
-    send_final_reply(
-        &bot,
-        chat_id,
-        thread_id,
-        Some(message_id),
-        placeholder_id,
-        &final_output,
-    )
-    .await
+    match generation_task.await {
+        Ok(Ok(_)) => {
+            println!(
+                "[channel/telegram] complete: chat_id={} message_id={}",
+                chat_id.0, message_id.0
+            );
+            Ok(())
+        }
+        Ok(Err(err)) => Err(anyhow::anyhow!("处理消息失败: {}", err)),
+        Err(err) => Err(anyhow::anyhow!("处理消息失败: 任务异常: {}", err)),
+    }
 }
 
-async fn send_final_reply(
+async fn finalize_assistant_message(
     bot: &Bot,
     chat_id: ChatId,
     thread_id: Option<ThreadId>,
     reply_to: Option<MessageId>,
-    message_id: MessageId,
-    text: &str,
+    placeholder_id: MessageId,
+    content: &str,
 ) -> Result<()> {
-    let normalized = if text.trim().is_empty() {
-        "(empty response)".to_string()
+    let visible = sanitize_stream_visible_text(content);
+    let normalized = if visible.trim().is_empty() {
+        "（本轮无文本回复）".to_string()
     } else {
-        text.to_string()
+        visible
     };
-
     let chunks = split_by_char_limit(&normalized, TELEGRAM_TEXT_LIMIT);
     if chunks.is_empty() {
-        let sent = send_message_in_context(
-            bot,
-            chat_id,
-            thread_id,
-            reply_to,
-            "(empty response)".to_string(),
-        )
-            .await
-            .context("发送 empty response 失败")?;
-        let _ = bot.delete_message(chat_id, message_id).await;
-        println!(
-            "[channel/telegram] final reply sent as empty response: chat_id={} placeholder_id={} sent_id={}",
-            chat_id.0,
-            message_id.0,
-            sent.id.0
-        );
         return Ok(());
     }
 
-    let first_sent = send_message_in_context(
-        bot,
-        chat_id,
-        thread_id,
-        reply_to,
-        chunks[0].clone(),
-    )
-        .await
-        .context("发送最终首段消息失败")?;
+    match try_edit_message(bot, chat_id, placeholder_id, &chunks[0]).await {
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!(
+                "[channel/telegram] finalize edit failed, fallback send: chat_id={} placeholder_id={} err={}",
+                chat_id.0,
+                placeholder_id.0,
+                err
+            );
+            let _ = send_message_in_context(
+                bot,
+                chat_id,
+                thread_id,
+                reply_to,
+                chunks[0].clone(),
+            )
+            .await
+            .context("发送 fallback assistant 消息失败")?;
+        }
+    }
 
     for chunk in chunks.iter().skip(1) {
-        let sent = send_message_in_context(
-            bot,
-            chat_id,
-            thread_id,
-            reply_to,
-            chunk.clone(),
-        )
+        let _ = send_message_in_context(bot, chat_id, thread_id, reply_to, chunk.clone())
             .await
-            .context("发送续段消息失败")?;
-        println!(
-            "[channel/telegram] continuation chunk sent: chat_id={} message_id={} chars={}",
-            chat_id.0,
-            sent.id.0,
-            chunk.chars().count()
-        );
+            .context("发送 assistant 续段失败")?;
     }
-
-    if let Err(err) = bot.delete_message(chat_id, message_id).await {
-        eprintln!(
-            "[channel/telegram] placeholder delete failed: chat_id={} placeholder_id={} err={}",
-            chat_id.0,
-            message_id.0,
-            err
-        );
-    }
-
-    println!(
-        "[channel/telegram] final reply sent: chat_id={} placeholder_id={} chunks={} first_chunk_chars={} first_sent_id={}",
-        chat_id.0,
-        message_id.0,
-        chunks.len(),
-        chunks[0].chars().count(),
-        first_sent.id.0
-    );
-    println!(
-        "[channel/telegram] complete: chat_id={} message_id={}",
-        chat_id.0, message_id.0
-    );
 
     Ok(())
+}
+
+fn format_tool_calls_for_telegram(tool_calls: &[ToolCall]) -> String {
+    if tool_calls.is_empty() {
+        return "🔧 function call: (empty)".to_string();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("🔧 function call 发起".to_string());
+    for call in tool_calls {
+        let args_preview = preview_chars(&call.function.arguments, TOOL_ARGS_PREVIEW_CHARS);
+        lines.push(format!(
+            "- {}(id={}) args={}",
+            call.function.name, call.id, args_preview
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_tool_result_for_telegram(msg: &ChatMessage) -> String {
+    let name = msg.name.clone().unwrap_or_else(|| "unknown_tool".to_string());
+    let call_id = msg
+        .tool_call_id
+        .clone()
+        .unwrap_or_else(|| "unknown_call".to_string());
+    let content = msg.content.clone().unwrap_or_default();
+    let preview = preview_chars(&content, 1200);
+    format!("🧾 function call 结果\n- tool={}\n- call_id={}\n- result={}", name, call_id, preview)
+}
+
+fn preview_chars(s: &str, max_chars: usize) -> String {
+    let normalized = s.replace('\n', " ").trim().to_string();
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        let cut = normalized.chars().take(max_chars).collect::<String>();
+        format!("{}...", cut)
+    }
 }
 
 async fn send_message_in_context(
@@ -343,11 +481,32 @@ fn preview_input(text: &str) -> String {
 }
 
 fn preview_for_telegram(streamed: &str) -> String {
-    if streamed.trim().is_empty() {
+    let visible = sanitize_stream_visible_text(streamed);
+    if visible.trim().is_empty() {
         "思考中...".to_string()
     } else {
-        truncate_chars(streamed, TELEGRAM_TEXT_LIMIT)
+        truncate_chars(&visible, TELEGRAM_TEXT_LIMIT)
     }
+}
+
+fn sanitize_stream_visible_text(text: &str) -> String {
+    let without_full_marker = text.replace(REACT_STOP_MARKER, "");
+    trim_partial_stop_marker_suffix(&without_full_marker)
+}
+
+fn trim_partial_stop_marker_suffix(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let marker = REACT_STOP_MARKER;
+    let max_check = marker.len().saturating_sub(1).min(text.len());
+    for suffix_len in (1..=max_check).rev() {
+        if text.ends_with(&marker[..suffix_len]) {
+            return text[..text.len() - suffix_len].to_string();
+        }
+    }
+    text.to_string()
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

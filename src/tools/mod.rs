@@ -15,6 +15,8 @@ use crate::types::{Message, ToolCall, ToolDefinition};
 pub mod http;
 pub mod web;
 pub mod exec;
+pub mod cron;
+pub mod awareness;
 pub mod memory;
 pub mod manager;
 pub mod skills;
@@ -55,6 +57,8 @@ impl ToolManager {
             "http_request".to_string(),
             "web_browser".to_string(),
             "exec_command".to_string(),
+            "cron_job_manager".to_string(),
+            "awareness".to_string(),
             "session_resource_manager".to_string(),
         ];
 
@@ -62,6 +66,8 @@ impl ToolManager {
         manager.register(Box::new(http::HttpTool));
         manager.register(Box::new(web::WebBrowserTool));
         manager.register(Box::new(exec::ExecTool));
+        manager.register(Box::new(cron::CronTool));
+        manager.register(Box::new(awareness::AwarenessTool));
         if let Some(backend) = memory_backend {
             available_tools.push("memory_rw".to_string());
             manager.register(Box::new(memory::MemoryTool::new(backend, memory_default_key)));
