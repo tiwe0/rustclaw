@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::memory::MemoryBackend;
+use crate::interrupt;
 use crate::session::SessionManager;
 use crate::skills::SkillsBackend;
 use crate::tools::ToolPlugin;
@@ -68,7 +69,7 @@ impl ToolPlugin for SessionResourceManagerTool {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["load", "remove", "view", "search"],
+                            "enum": ["load", "remove", "view", "search", "interrupt", "close"],
                             "description": "执行动作"
                         },
                         "category": {
@@ -108,6 +109,15 @@ impl ToolPlugin for SessionResourceManagerTool {
         let mut session = self.session_manager.load_session(&session_id)?;
 
         match action.as_str() {
+            "interrupt" | "close" => {
+                interrupt::cancel_session(&session_id);
+                Ok(json!({
+                    "ok": true,
+                    "action": action,
+                    "session": session_id,
+                    "interrupted": true
+                }))
+            }
             "load" => {
                 let category = parse_category(parsed.category.as_deref())?;
                 let category = category.ok_or_else(|| anyhow::anyhow!("load 需要 category"))?;
@@ -183,7 +193,10 @@ impl ToolPlugin for SessionResourceManagerTool {
                     "data": filter_payload_by_keyword(data, &keyword)
                 }))
             }
-            _ => Err(anyhow::anyhow!("未知 action: {}，支持 load/remove/view/search", action)),
+            _ => Err(anyhow::anyhow!(
+                "未知 action: {}，支持 load/remove/view/search/interrupt/close",
+                action
+            )),
         }
     }
 }

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
+use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
+use teloxide::types::{ChatId, ChatMemberUpdated, MessageId, ReplyParameters, ThreadId, Update};
 use teloxide::update_listeners;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -52,18 +54,24 @@ pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
 
     let bot = build_bot(&cfg)?;
     let listener = build_polling_listener(bot.clone(), &cfg).await;
-    teloxide::repl_with_listener(bot, move |bot: Bot, msg: teloxide::types::Message| {
-        let cfg = cfg.clone();
-        async move {
-            if let Err(err) = handle_message(bot, msg, cfg).await {
-                eprintln!("[channel/telegram] handle_message error: {}", err);
-            } else {
-                println!("[channel/telegram] message handled, waiting for next update...");
-            }
-            respond(())
-        }
-    }, listener)
-    .await;
+
+    let handler = dptree::entry()
+        .branch(Update::filter_message().endpoint(handle_message_update))
+        .branch(Update::filter_my_chat_member().endpoint(handle_chat_member_update))
+        .branch(Update::filter_chat_member().endpoint(handle_chat_member_update));
+
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![cfg.clone()])
+        .default_handler(|upd| async move {
+            println!("[channel/telegram] skip unsupported update: {:?}", upd.kind);
+        })
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch_with_listener(
+            listener,
+            LoggingErrorHandler::with_custom_text("[channel/telegram] dispatcher error"),
+        )
+        .await;
 
     Ok(())
 }
@@ -100,7 +108,11 @@ fn normalized_poll_interval(raw_ms: u64) -> Duration {
     Duration::from_millis(raw_ms.clamp(100, 10_000))
 }
 
-async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<TelegramChannelConfig>) -> Result<()> {
+async fn handle_message_update(
+    bot: Bot,
+    msg: teloxide::types::Message,
+    cfg: Arc<TelegramChannelConfig>,
+) -> Result<()> {
     let chat_id = msg.chat.id;
     let message_id = msg.id;
     let thread_id = msg.thread_id;
@@ -370,6 +382,45 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         Ok(Err(err)) => Err(anyhow::anyhow!("处理消息失败: {}", err)),
         Err(err) => Err(anyhow::anyhow!("处理消息失败: 任务异常: {}", err)),
     }
+}
+
+async fn handle_chat_member_update(
+    update: ChatMemberUpdated,
+    cfg: Arc<TelegramChannelConfig>,
+) -> Result<()> {
+    let chat_id = update.chat.id;
+    if let Some(limit_chat_id) = cfg.chat_id
+        && chat_id.0 != limit_chat_id
+    {
+        println!(
+            "[channel/telegram] skip chat member update: chat_id={} not allowed",
+            chat_id.0
+        );
+        return Ok(());
+    }
+
+    let old_status = format!("{:?}", update.old_chat_member.status());
+    let new_status = format!("{:?}", update.new_chat_member.status());
+    println!(
+        "[channel/telegram] chat_member update: chat_id={} old_status={} new_status={}",
+        chat_id.0, old_status, new_status
+    );
+
+    if is_terminal_member_status(&new_status) {
+        let session_id = format!("telegram_{}", chat_id.0);
+        interrupt::cancel_session(&session_id);
+        println!(
+            "[channel/telegram] chat became unavailable, interrupt session: chat_id={} session_id={}",
+            chat_id.0, session_id
+        );
+    }
+
+    Ok(())
+}
+
+fn is_terminal_member_status(status: &str) -> bool {
+    let normalized = status.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "left" | "banned")
 }
 
 async fn finalize_assistant_message(
