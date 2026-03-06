@@ -178,6 +178,17 @@ pub async fn call_once(user_input: &str) -> Result<String> {
 }
 
 pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> Result<String> {
+    call_once_stream_with_session(user_input, session, |_| {}).await
+}
+
+pub async fn call_once_stream_with_session<F>(
+    user_input: &str,
+    session: Option<&str>,
+    mut on_token: F,
+) -> Result<String>
+where
+    F: FnMut(&str) + Send,
+{
     let config_path = resolve_config_path();
     let config = load_config(&config_path)?;
     let model_config = config.model;
@@ -265,7 +276,9 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
             window_size_chars: model_config.window_size,
         },
         |_| {},
-        |_| {},
+        |token| {
+            on_token(token);
+        },
         |_| {},
     )
     .await;

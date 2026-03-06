@@ -15,8 +15,6 @@ use crate::types::{Message, ToolCall, ToolDefinition};
 pub mod http;
 pub mod web;
 pub mod exec;
-#[cfg(feature = "mobile")]
-pub mod mobile;
 pub mod memory;
 pub mod manager;
 pub mod skills;
@@ -64,11 +62,6 @@ impl ToolManager {
         manager.register(Box::new(http::HttpTool));
         manager.register(Box::new(web::WebBrowserTool));
         manager.register(Box::new(exec::ExecTool));
-        #[cfg(feature = "mobile")]
-        {
-            available_tools.push("mobile_tool".to_string());
-            manager.register(Box::new(mobile::MobileTool));
-        }
         if let Some(backend) = memory_backend {
             available_tools.push("memory_rw".to_string());
             manager.register(Box::new(memory::MemoryTool::new(backend, memory_default_key)));

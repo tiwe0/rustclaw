@@ -1,47 +1,18 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use tokio::time::{sleep, Duration};
+use std::sync::Arc;
+use teloxide::prelude::*;
+use teloxide::types::{ChatId, MessageId};
+use teloxide::update_listeners;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 
 use crate::app;
 use crate::config::TelegramChannelConfig;
 
-#[derive(Debug, Deserialize)]
-struct TelegramGetUpdatesResponse {
-    ok: bool,
-    result: Vec<TelegramUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    message: Option<TelegramMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramMessage {
-    chat: TelegramChat,
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramChat {
-    id: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct GetUpdatesRequest {
-    timeout: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    offset: Option<i64>,
-    allowed_updates: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct SendMessageRequest {
-    chat_id: i64,
-    text: String,
-}
+const TELEGRAM_TEXT_LIMIT: usize = 3900;
+const STREAM_EDIT_INTERVAL_MS: u64 = 700;
+const TELEGRAM_DEFAULT_API_BASE_URL: &str = "https://api.telegram.org";
+const INPUT_PREVIEW_CHARS: usize = 80;
 
 pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
     if cfg.bot_token.trim().is_empty() {
@@ -50,131 +21,283 @@ pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
         ));
     }
 
-    let client = Client::new();
-    let base_url = cfg.api_base_url.trim_end_matches('/').to_string();
-    let mut offset: Option<i64> = None;
+    let cfg = Arc::new(cfg);
 
     println!(
-        "[channel/telegram] started: poll={}ms timeout={}s",
+        "[channel/telegram] started with teloxide: poll={}ms timeout={}s api_base_url={}",
         cfg.poll_interval_ms, cfg.long_poll_timeout_secs
+        , cfg.api_base_url
+    );
+    println!(
+        "[channel/telegram] chat_id filter: {}",
+        cfg.chat_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "<disabled>".to_string())
     );
 
-    loop {
-        let updates = get_updates(
-            &client,
-            &base_url,
-            &cfg.bot_token,
-            offset,
-            cfg.long_poll_timeout_secs,
-        )
-        .await;
-
-        match updates {
-            Ok(list) => {
-                for update in list {
-                    offset = Some(update.update_id + 1);
-
-                    let Some(message) = update.message else {
-                        continue;
-                    };
-
-                    if let Some(limit_chat_id) = cfg.chat_id {
-                        if message.chat.id != limit_chat_id {
-                            continue;
-                        }
-                    }
-
-                    let Some(text) = message.text else {
-                        continue;
-                    };
-
-                    let user_input = text.trim();
-                    if user_input.is_empty() {
-                        continue;
-                    }
-
-                    let reply = match app::call_once(user_input).await {
-                        Ok(output) if !output.trim().is_empty() => output,
-                        Ok(_) => "(empty response)".to_string(),
-                        Err(err) => format!("处理消息失败: {}", err),
-                    };
-
-                    if let Err(err) = send_message(
-                        &client,
-                        &base_url,
-                        &cfg.bot_token,
-                        message.chat.id,
-                        &reply,
-                    )
-                    .await
-                    {
-                        eprintln!("[channel/telegram] send_message error: {}", err);
-                    }
-                }
+    let bot = build_bot(&cfg)?;
+    let listener = build_polling_listener(bot.clone(), &cfg).await;
+    teloxide::repl_with_listener(bot, move |bot: Bot, msg: teloxide::types::Message| {
+        let cfg = cfg.clone();
+        async move {
+            if let Err(err) = handle_message(bot, msg, cfg).await {
+                eprintln!("[channel/telegram] handle_message error: {}", err);
             }
-            Err(err) => {
-                eprintln!("[channel/telegram] get_updates error: {}", err);
-            }
+            respond(())
         }
-
-        sleep(Duration::from_millis(cfg.poll_interval_ms)).await;
-    }
-}
-
-async fn get_updates(
-    client: &Client,
-    base_url: &str,
-    bot_token: &str,
-    offset: Option<i64>,
-    timeout_secs: u64,
-) -> Result<Vec<TelegramUpdate>> {
-    let url = format!("{}/bot{}/getUpdates", base_url, bot_token);
-    let body = GetUpdatesRequest {
-        timeout: timeout_secs,
-        offset,
-        allowed_updates: vec!["message".to_string()],
-    };
-
-    let response = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .context("调用 getUpdates 失败")?
-        .error_for_status()
-        .context("getUpdates 返回错误状态")?
-        .json::<TelegramGetUpdatesResponse>()
-        .await
-        .context("解析 getUpdates 响应失败")?;
-
-    if !response.ok {
-        return Err(anyhow::anyhow!("getUpdates 响应 ok=false"));
-    }
-
-    Ok(response.result)
-}
-
-async fn send_message(
-    client: &Client,
-    base_url: &str,
-    bot_token: &str,
-    chat_id: i64,
-    text: &str,
-) -> Result<()> {
-    let url = format!("{}/bot{}/sendMessage", base_url, bot_token);
-    let body = SendMessageRequest {
-        chat_id,
-        text: text.to_string(),
-    };
-
-    client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .context("调用 sendMessage 失败")?
-        .error_for_status()
-        .context("sendMessage 返回错误状态")?;
+    }, listener)
+    .await;
 
     Ok(())
+}
+
+fn build_bot(cfg: &TelegramChannelConfig) -> Result<Bot> {
+    let mut bot = Bot::new(cfg.bot_token.clone());
+    let raw = cfg.api_base_url.trim();
+    if !raw.is_empty() && raw.trim_end_matches('/') != TELEGRAM_DEFAULT_API_BASE_URL {
+        let parsed = reqwest::Url::parse(raw)
+            .with_context(|| format!("非法 channel.telegram.api_base_url: {}", raw))?;
+        println!("[channel/telegram] use custom api_base_url: {}", raw);
+        bot = bot.set_api_url(parsed);
+    }
+    Ok(bot)
+}
+
+async fn build_polling_listener(bot: Bot, cfg: &TelegramChannelConfig) -> update_listeners::Polling<Bot> {
+    let timeout_secs = normalized_long_poll_timeout_secs(cfg.long_poll_timeout_secs);
+    let retry_interval = normalized_poll_interval(cfg.poll_interval_ms);
+
+    update_listeners::Polling::builder(bot)
+        .timeout(Duration::from_secs(timeout_secs))
+        .backoff_strategy(move |_| retry_interval)
+        .delete_webhook()
+        .await
+        .build()
+}
+
+fn normalized_long_poll_timeout_secs(raw: u64) -> u64 {
+    raw.clamp(1, 120)
+}
+
+fn normalized_poll_interval(raw_ms: u64) -> Duration {
+    Duration::from_millis(raw_ms.clamp(100, 10_000))
+}
+
+async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<TelegramChannelConfig>) -> Result<()> {
+    let chat_id = msg.chat.id;
+    let message_id = msg.id;
+
+    if let Some(limit_chat_id) = cfg.chat_id
+        && chat_id.0 != limit_chat_id
+    {
+        println!(
+            "[channel/telegram] skip message: chat_id={} not allowed",
+            chat_id.0
+        );
+        return Ok(());
+    }
+
+    let Some(text) = msg.text() else {
+        println!(
+            "[channel/telegram] skip non-text message: chat_id={} message_id={}",
+            chat_id.0, message_id.0
+        );
+        return Ok(());
+    };
+
+    let user_input = text.trim();
+    if user_input.is_empty() {
+        println!(
+            "[channel/telegram] skip empty text: chat_id={} message_id={}",
+            chat_id.0, message_id.0
+        );
+        return Ok(());
+    }
+
+    println!(
+        "[channel/telegram] incoming text: chat_id={} message_id={} preview={}",
+        chat_id.0,
+        message_id.0,
+        preview_input(user_input)
+    );
+
+    let sent = bot
+        .send_message(chat_id, "思考中...")
+        .await
+        .context("发送占位消息失败")?;
+
+    let placeholder_id = sent.id;
+    println!(
+        "[channel/telegram] placeholder sent: chat_id={} message_id={}",
+        chat_id.0, placeholder_id.0
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let input_owned = user_input.to_string();
+    let generation_task = tokio::spawn(async move {
+        app::call_once_stream_with_session(&input_owned, None, move |token| {
+            let _ = tx.send(token.to_string());
+        })
+        .await
+    });
+
+    let mut streamed = String::new();
+    let mut last_edit = Instant::now();
+    let mut edit_count = 0usize;
+    let mut streamed_tokens = 0usize;
+
+    while let Some(token) = rx.recv().await {
+        streamed_tokens += 1;
+        streamed.push_str(&token);
+        if last_edit.elapsed() >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
+            let preview = preview_for_telegram(&streamed);
+            if try_edit_message(&bot, chat_id, placeholder_id, &preview).await? {
+                edit_count += 1;
+            }
+            last_edit = Instant::now();
+        }
+    }
+
+    println!(
+        "[channel/telegram] stream done: chat_id={} placeholder_id={} tokens={} chars={} edits={}",
+        chat_id.0,
+        placeholder_id.0,
+        streamed_tokens,
+        streamed.chars().count(),
+        edit_count
+    );
+
+    let final_output = match generation_task.await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => format!("处理消息失败: {}", err),
+        Err(err) => format!("处理消息失败: 任务异常: {}", err),
+    };
+
+    println!(
+        "[channel/telegram] finalizing reply: chat_id={} placeholder_id={} chars={}",
+        chat_id.0,
+        placeholder_id.0,
+        final_output.chars().count()
+    );
+
+    send_final_reply(&bot, chat_id, placeholder_id, &final_output).await
+}
+
+async fn send_final_reply(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: &str) -> Result<()> {
+    let normalized = if text.trim().is_empty() {
+        "(empty response)".to_string()
+    } else {
+        text.to_string()
+    };
+
+    let chunks = split_by_char_limit(&normalized, TELEGRAM_TEXT_LIMIT);
+    if chunks.is_empty() {
+        let _ = try_edit_message(bot, chat_id, message_id, "(empty response)").await;
+        println!(
+            "[channel/telegram] final reply sent as empty response: chat_id={} message_id={}",
+            chat_id.0, message_id.0
+        );
+        return Ok(());
+    }
+
+    let _ = try_edit_message(bot, chat_id, message_id, &chunks[0]).await;
+    for chunk in chunks.iter().skip(1) {
+        bot.send_message(chat_id, chunk.clone())
+            .await
+            .context("发送续段消息失败")?;
+    }
+
+    println!(
+        "[channel/telegram] final reply sent: chat_id={} message_id={} chunks={} first_chunk_chars={}",
+        chat_id.0,
+        message_id.0,
+        chunks.len(),
+        chunks[0].chars().count()
+    );
+
+    Ok(())
+}
+
+async fn try_edit_message(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: &str) -> Result<bool> {
+    match bot
+        .edit_message_text(chat_id, message_id, text.to_string())
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let err_text = err.to_string();
+            if err_text.contains("message is not modified") {
+                return Ok(false);
+            }
+            Err(anyhow::anyhow!("编辑消息失败: {}", err_text))
+        }
+    }
+}
+
+fn preview_input(text: &str) -> String {
+    let total = text.chars().count();
+    let truncated: String = text.chars().take(INPUT_PREVIEW_CHARS).collect();
+    if total > INPUT_PREVIEW_CHARS {
+        format!("\"{}...\" (chars={})", truncated, total)
+    } else {
+        format!("\"{}\" (chars={})", truncated, total)
+    }
+}
+
+fn preview_for_telegram(streamed: &str) -> String {
+    if streamed.trim().is_empty() {
+        "思考中...".to_string()
+    } else {
+        truncate_chars(streamed, TELEGRAM_TEXT_LIMIT)
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn split_by_char_limit(text: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut len = 0usize;
+
+    for ch in text.chars() {
+        if len >= max_chars {
+            out.push(current);
+            current = String::new();
+            len = 0;
+        }
+        current.push(ch);
+        len += 1;
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalized_long_poll_timeout_secs, normalized_poll_interval};
+    use tokio::time::Duration;
+
+    #[test]
+    fn test_normalized_long_poll_timeout() {
+        assert_eq!(normalized_long_poll_timeout_secs(0), 1);
+        assert_eq!(normalized_long_poll_timeout_secs(20), 20);
+        assert_eq!(normalized_long_poll_timeout_secs(999), 120);
+    }
+
+    #[test]
+    fn test_normalized_poll_interval() {
+        assert_eq!(normalized_poll_interval(0), Duration::from_millis(100));
+        assert_eq!(normalized_poll_interval(1200), Duration::from_millis(1200));
+        assert_eq!(normalized_poll_interval(99_999), Duration::from_millis(10_000));
+    }
 }
