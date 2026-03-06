@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId};
+use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
 use teloxide::update_listeners;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -42,6 +42,8 @@ pub async fn run(cfg: TelegramChannelConfig) -> Result<()> {
         async move {
             if let Err(err) = handle_message(bot, msg, cfg).await {
                 eprintln!("[channel/telegram] handle_message error: {}", err);
+            } else {
+                println!("[channel/telegram] message handled, waiting for next update...");
             }
             respond(())
         }
@@ -86,6 +88,7 @@ fn normalized_poll_interval(raw_ms: u64) -> Duration {
 async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<TelegramChannelConfig>) -> Result<()> {
     let chat_id = msg.chat.id;
     let message_id = msg.id;
+    let thread_id = msg.thread_id;
 
     if let Some(limit_chat_id) = cfg.chat_id
         && chat_id.0 != limit_chat_id
@@ -121,10 +124,15 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         preview_input(user_input)
     );
 
-    let sent = bot
-        .send_message(chat_id, "思考中...")
-        .await
-        .context("发送占位消息失败")?;
+    let sent = send_message_in_context(
+        &bot,
+        chat_id,
+        thread_id,
+        Some(message_id),
+        "思考中...".to_string(),
+    )
+    .await
+    .context("发送占位消息失败")?;
 
     let placeholder_id = sent.id;
     println!(
@@ -151,8 +159,19 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         streamed.push_str(&token);
         if last_edit.elapsed() >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
             let preview = preview_for_telegram(&streamed);
-            if try_edit_message(&bot, chat_id, placeholder_id, &preview).await? {
-                edit_count += 1;
+            match try_edit_message(&bot, chat_id, placeholder_id, &preview).await {
+                Ok(true) => {
+                    edit_count += 1;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    eprintln!(
+                        "[channel/telegram] stream edit failed: chat_id={} placeholder_id={} err={}",
+                        chat_id.0,
+                        placeholder_id.0,
+                        err
+                    );
+                }
             }
             last_edit = Instant::now();
         }
@@ -180,10 +199,25 @@ async fn handle_message(bot: Bot, msg: teloxide::types::Message, cfg: Arc<Telegr
         final_output.chars().count()
     );
 
-    send_final_reply(&bot, chat_id, placeholder_id, &final_output).await
+    send_final_reply(
+        &bot,
+        chat_id,
+        thread_id,
+        Some(message_id),
+        placeholder_id,
+        &final_output,
+    )
+    .await
 }
 
-async fn send_final_reply(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: &str) -> Result<()> {
+async fn send_final_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<MessageId>,
+    message_id: MessageId,
+    text: &str,
+) -> Result<()> {
     let normalized = if text.trim().is_empty() {
         "(empty response)".to_string()
     } else {
@@ -192,30 +226,94 @@ async fn send_final_reply(bot: &Bot, chat_id: ChatId, message_id: MessageId, tex
 
     let chunks = split_by_char_limit(&normalized, TELEGRAM_TEXT_LIMIT);
     if chunks.is_empty() {
-        let _ = try_edit_message(bot, chat_id, message_id, "(empty response)").await;
+        let sent = send_message_in_context(
+            bot,
+            chat_id,
+            thread_id,
+            reply_to,
+            "(empty response)".to_string(),
+        )
+            .await
+            .context("发送 empty response 失败")?;
+        let _ = bot.delete_message(chat_id, message_id).await;
         println!(
-            "[channel/telegram] final reply sent as empty response: chat_id={} message_id={}",
-            chat_id.0, message_id.0
+            "[channel/telegram] final reply sent as empty response: chat_id={} placeholder_id={} sent_id={}",
+            chat_id.0,
+            message_id.0,
+            sent.id.0
         );
         return Ok(());
     }
 
-    let _ = try_edit_message(bot, chat_id, message_id, &chunks[0]).await;
+    let first_sent = send_message_in_context(
+        bot,
+        chat_id,
+        thread_id,
+        reply_to,
+        chunks[0].clone(),
+    )
+        .await
+        .context("发送最终首段消息失败")?;
+
     for chunk in chunks.iter().skip(1) {
-        bot.send_message(chat_id, chunk.clone())
+        let sent = send_message_in_context(
+            bot,
+            chat_id,
+            thread_id,
+            reply_to,
+            chunk.clone(),
+        )
             .await
             .context("发送续段消息失败")?;
+        println!(
+            "[channel/telegram] continuation chunk sent: chat_id={} message_id={} chars={}",
+            chat_id.0,
+            sent.id.0,
+            chunk.chars().count()
+        );
+    }
+
+    if let Err(err) = bot.delete_message(chat_id, message_id).await {
+        eprintln!(
+            "[channel/telegram] placeholder delete failed: chat_id={} placeholder_id={} err={}",
+            chat_id.0,
+            message_id.0,
+            err
+        );
     }
 
     println!(
-        "[channel/telegram] final reply sent: chat_id={} message_id={} chunks={} first_chunk_chars={}",
+        "[channel/telegram] final reply sent: chat_id={} placeholder_id={} chunks={} first_chunk_chars={} first_sent_id={}",
         chat_id.0,
         message_id.0,
         chunks.len(),
-        chunks[0].chars().count()
+        chunks[0].chars().count(),
+        first_sent.id.0
+    );
+    println!(
+        "[channel/telegram] complete: chat_id={} message_id={}",
+        chat_id.0, message_id.0
     );
 
     Ok(())
+}
+
+async fn send_message_in_context(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<MessageId>,
+    text: String,
+) -> Result<teloxide::types::Message> {
+    let mut req = bot.send_message(chat_id, text);
+    if let Some(thread_id) = thread_id {
+        req = req.message_thread_id(thread_id);
+    }
+    if let Some(reply_to) = reply_to {
+        req = req.reply_parameters(ReplyParameters::new(reply_to));
+    }
+    let sent = req.await.context("send_message 请求失败")?;
+    Ok(sent)
 }
 
 async fn try_edit_message(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: &str) -> Result<bool> {
