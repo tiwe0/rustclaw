@@ -16,6 +16,7 @@ pub enum MemoryWriteMode {
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
     fn provider_name(&self) -> &'static str;
+    async fn list(&self) -> Result<Vec<String>>;
     async fn read(&self, key: &str) -> Result<String>;
     async fn write(&self, key: &str, content: &str, mode: MemoryWriteMode) -> Result<()>;
 }

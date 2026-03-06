@@ -27,6 +27,25 @@ impl MemoryBackend for MarkdownMemoryBackend {
         "markdown"
     }
 
+    async fn list(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        let mut dir = tokio::fs::read_dir(&self.base_dir)
+            .await
+            .with_context(|| format!("读取 memory 目录失败: {}", self.base_dir.display()))?;
+
+        while let Some(entry) = dir.next_entry().await.context("遍历 memory 目录失败")? {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) == Some("md") {
+                if let Some(file_name) = path.file_name().and_then(|v| v.to_str()) {
+                    names.push(file_name.to_string());
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
     async fn read(&self, key: &str) -> Result<String> {
         let path = self.file_path(key);
         if !path.exists() {

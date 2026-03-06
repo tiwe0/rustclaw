@@ -1,6 +1,8 @@
 use anyhow::Result;
+use serde_json::to_string;
 
 use crate::model::ChatModel;
+use crate::session::{MemoryLoaded, SkillsLoaded, ToolsLoaded};
 use crate::tools::ToolManager;
 use crate::types::{AssistantReply, Message, ToolCall};
 
@@ -58,10 +60,19 @@ pub struct ReActSummary {
     pub stop_reason: ReActStopReason,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionLoadedState {
+    pub skills_loaded: SkillsLoaded,
+    pub memory_loaded: MemoryLoaded,
+    pub tools_loaded: ToolsLoaded,
+}
+
 pub async fn run_react_loop<FStart, FToken, FTool>(
     client: &dyn ChatModel,
     tool_manager: &ToolManager,
     messages: &mut Vec<Message>,
+    mut session_provider: impl FnMut() -> Option<SessionLoadedState>,
+    session_id: Option<&str>,
     options: ReActOptions,
     mut on_assistant_started: FStart,
     mut on_token: FToken,
@@ -78,9 +89,12 @@ where
     for loop_idx in 0..options.max_loops {
         on_assistant_started(loop_idx + 1);
 
+        let current_session_state = session_provider();
+
         let reply = request_assistant(
             client,
             messages,
+            current_session_state.as_ref(),
             &tools,
             options.stream_enabled,
             options.max_message_chars,
@@ -120,7 +134,7 @@ where
 
         on_tool_calls_started(&tool_calls);
         let tool_messages = tool_manager
-            .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1))
+            .run_tool_calls_in_loop(&tool_calls, Some(loop_idx + 1), session_id)
             .await?;
         messages.extend(tool_messages);
     }
@@ -142,6 +156,7 @@ where
 async fn request_assistant<FToken>(
     client: &dyn ChatModel,
     messages: &[Message],
+    session: Option<&SessionLoadedState>,
     tools: &[crate::types::ToolDefinition],
     stream_enabled: bool,
     max_message_chars: usize,
@@ -153,6 +168,7 @@ where
 {
     let request_messages = build_request_messages(
         messages,
+        session,
         max_message_chars,
         window_size_chars,
     );
@@ -178,15 +194,54 @@ where
 
 fn build_request_messages(
     messages: &[Message],
+    session: Option<&SessionLoadedState>,
     max_message_chars: usize,
     window_size_chars: usize,
 ) -> Vec<Message> {
     let mut expanded = Vec::new();
+
+    if let Some(session_state) = session {
+        expanded.extend(build_session_injected_system_messages(session_state));
+    }
+
     for message in messages {
         expanded.extend(split_message_if_needed(message, max_message_chars));
     }
 
     apply_window_size(expanded, window_size_chars)
+}
+
+fn build_session_injected_system_messages(session_state: &SessionLoadedState) -> Vec<Message> {
+    let skills_json = to_string(&session_state.skills_loaded)
+        .unwrap_or_else(|_| "{\"entries\":[]}".to_string());
+    let memory_json = to_string(&session_state.memory_loaded)
+        .unwrap_or_else(|_| "{\"entries\":[]}".to_string());
+    let tools_json = to_string(&session_state.tools_loaded)
+        .unwrap_or_else(|_| "{\"entries\":[]}".to_string());
+
+    vec![
+        Message {
+            role: "system".to_string(),
+            content: Some(format!("skills_loaded={}", skills_json)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+        Message {
+            role: "system".to_string(),
+            content: Some(format!("memory_loaded={}", memory_json)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+        Message {
+            role: "system".to_string(),
+            content: Some(format!("tools_loaded={}", tools_json)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+    ]
 }
 
 fn split_message_if_needed(message: &Message, max_message_chars: usize) -> Vec<Message> {
@@ -203,57 +258,22 @@ fn split_message_if_needed(message: &Message, max_message_chars: usize) -> Vec<M
     }
 
     match message.role.as_str() {
-        "user" => split_user_message(message, max_message_chars),
-        "tool" => split_tool_message_to_user_messages(message, max_message_chars),
+        "user" | "tool" | "system" => split_message_with_same_role(message, max_message_chars),
         _ => vec![message.clone()],
     }
 }
 
-fn split_user_message(message: &Message, max_message_chars: usize) -> Vec<Message> {
+fn split_message_with_same_role(message: &Message, max_message_chars: usize) -> Vec<Message> {
     let Some(content) = &message.content else {
         return vec![message.clone()];
     };
 
     split_text_chunks(content, max_message_chars)
         .into_iter()
-        .map(|chunk| Message {
-            role: "user".to_string(),
-            content: Some(chunk),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        })
-        .collect()
-}
-
-fn split_tool_message_to_user_messages(message: &Message, max_message_chars: usize) -> Vec<Message> {
-    let Some(content) = &message.content else {
-        return vec![message.clone()];
-    };
-
-    let tool_name = message
-        .name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("tool");
-    let chunks = split_text_chunks(content, max_message_chars);
-    let total = chunks.len();
-
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(idx, chunk)| Message {
-            role: "user".to_string(),
-            content: Some(format!(
-                "[functioncall:{} part {}/{}]\n{}",
-                tool_name,
-                idx + 1,
-                total,
-                chunk
-            )),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
+        .map(|chunk| {
+            let mut m = message.clone();
+            m.content = Some(chunk);
+            m
         })
         .collect()
 }

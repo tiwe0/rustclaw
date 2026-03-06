@@ -20,7 +20,7 @@ use crate::config::{load_config, resolve_app_base_dir, resolve_config_path};
 use crate::log;
 use crate::memory::create_memory_backend;
 use crate::model::{ChatModel, create_model_provider};
-use crate::react_agent::{run_react_loop, ReActOptions, ReActStopReason};
+use crate::react_agent::{run_react_loop, ReActOptions, ReActStopReason, SessionLoadedState};
 use crate::session::{ChatSession, SessionManager, SessionMeta, session_db_path, session_dir_path};
 use crate::skills::create_skills_backend;
 use crate::tools::ToolManager;
@@ -99,6 +99,14 @@ web_browser 工具使用规则（必须遵守）：
     )
 }
 
+fn session_loaded_state_from_session(session: &ChatSession) -> SessionLoadedState {
+    SessionLoadedState {
+        skills_loaded: session.skills_loaded.clone(),
+        memory_loaded: session.memory_loaded.clone(),
+        tools_loaded: session.tools_loaded.clone(),
+    }
+}
+
 pub async fn run() -> Result<()> {
     let config_path = resolve_config_path();
     let config = load_config(&config_path)?;
@@ -123,7 +131,9 @@ pub async fn run() -> Result<()> {
     );
     let memory_backend = create_memory_backend(&memory_config, &app_base_dir).await?;
     let skills_backend = create_skills_backend(&skills_config, &app_base_dir).await?;
+    let session_manager = SessionManager::new(&app_base_dir)?;
     let tool_manager = Arc::new(ToolManager::with_builtin_plugins(
+        session_manager.clone(),
         memory_backend,
         memory_config.default_key,
         skills_backend,
@@ -134,7 +144,6 @@ pub async fn run() -> Result<()> {
     let user_msg_color = parse_tui_color(&tui_config.user_msg_color, Color::Green);
     let system_msg_color = parse_tui_color(&tui_config.system_msg_color, Color::Yellow);
 
-    let session_manager = SessionManager::new(&app_base_dir)?;
     let active_session = session_manager.load_or_create_active(&system_prompt)?;
     let shared_session = Arc::new(Mutex::new(active_session));
 
@@ -191,6 +200,7 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
     let memory_backend = create_memory_backend(&memory_config, &app_base_dir).await?;
     let skills_backend = create_skills_backend(&skills_config, &app_base_dir).await?;
     let tool_manager = ToolManager::with_builtin_plugins(
+        session_manager.clone(),
         memory_backend,
         memory_config.default_key,
         skills_backend,
@@ -212,13 +222,11 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
                 .as_millis();
             let sid = format!("cron_new_{}", ts);
             transient_session_id = Some(sid.clone());
-            session_manager
-                .create_named_session(&sid, &system_prompt)?
-                .messages
+            let session_obj = session_manager.create_named_session(&sid, &system_prompt)?;
+            session_obj.messages
         } else {
-            session_manager
-                .load_or_create_named_session(key, &system_prompt)?
-                .messages
+            let session_obj = session_manager.load_or_create_named_session(key, &system_prompt)?;
+            session_obj.messages
         }
     } else {
         vec![Message {
@@ -242,6 +250,13 @@ pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> 
         client.as_ref(),
         &tool_manager,
         &mut working_messages,
+        || {
+            session_key
+                .as_ref()
+                .and_then(|sid| session_manager.load_session(sid).ok())
+                .map(|s| session_loaded_state_from_session(&s))
+        },
+        session_key.as_deref(),
         ReActOptions {
             stream_enabled: model_config.stream,
             max_loops: agent_config.react_max_loops,
@@ -374,6 +389,11 @@ async fn run_tui_loop(
                     continue;
                 }
 
+                if app.show_loaded_popup {
+                    handle_loaded_popup_key(key.code, &mut app);
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         abort_all_tasks(&mut app, &mut running_tasks, "用户退出中断");
@@ -384,6 +404,10 @@ async fn run_tui_loop(
                     }
                     KeyCode::F(2) => {
                         open_session_popup(&session_manager, &session, &mut app).await?;
+                    }
+                    KeyCode::F(3) => {
+                        let locked = session.lock().await;
+                        app.open_loaded_popup(&locked);
                     }
                     KeyCode::PageUp => {
                         app.scroll_up(SCROLL_STEP);
@@ -540,6 +564,13 @@ async fn open_session_popup(
     Ok(())
 }
 
+fn handle_loaded_popup_key(key: KeyCode, app: &mut TuiApp) {
+    match key {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::F(3) => app.close_loaded_popup(),
+        _ => {}
+    }
+}
+
 async fn execute_command(
     line: &str,
     session_manager: &SessionManager,
@@ -553,10 +584,18 @@ async fn execute_command(
     let cmd = parts.next().unwrap_or_default();
     let arg = parts.next().map(str::trim).unwrap_or("");
 
+    let format_loaded = |entries: &[String]| {
+        if entries.is_empty() {
+            "(none)".to_string()
+        } else {
+            entries.join(", ")
+        }
+    };
+
     match cmd {
         "/help" => {
-            app.push_line("system> 命令: /help /new [title] /list /use <id> /history /clear /tasks /interrupt /cancel [task_id|all] /exit".to_string());
-            app.push_line("system> 键位: PgUp/PgDn滚动, ↑/↓输入历史, F2会话弹窗, Ctrl+K打断当前会话".to_string());
+            app.push_line("system> 命令: /help /new [title] /list /use <id> /history /loaded /clear /tasks /interrupt /cancel [task_id|all] /exit".to_string());
+            app.push_line("system> 键位: PgUp/PgDn滚动, ↑/↓输入历史, F2会话弹窗, F3查看loaded, Ctrl+K打断当前会话".to_string());
         }
         "/new" => {
             let title = if arg.is_empty() {
@@ -601,6 +640,25 @@ async fn execute_command(
                 let content = message.content.as_deref().unwrap_or("");
                 app.push_line(format!("{}> {}", message.role, content));
             }
+        }
+        "/loaded" | "/resources" => {
+            let locked = session.lock().await;
+            app.push_line(format!(
+                "system> loaded @ {} ({})",
+                locked.id, locked.title
+            ));
+            app.push_line(format!(
+                "system> memory_loaded: {}",
+                format_loaded(&locked.memory_loaded.entries)
+            ));
+            app.push_line(format!(
+                "system> skills_loaded: {}",
+                format_loaded(&locked.skills_loaded.entries)
+            ));
+            app.push_line(format!(
+                "system> tools_loaded: {}",
+                format_loaded(&locked.tools_loaded.entries)
+            ));
         }
         "/clear" => {
             {
@@ -709,6 +767,13 @@ async fn process_user_turn_async(
         client,
         tool_manager,
         &mut working_session.messages,
+        || {
+            session_manager
+                .load_session(session_id)
+                .ok()
+                .map(|s| session_loaded_state_from_session(&s))
+        },
+        Some(session_id),
         ReActOptions {
             stream_enabled,
             max_loops: react_max_loops,
@@ -773,10 +838,12 @@ async fn process_user_turn_async(
         ReActStopReason::AssistantFinished => {}
     }
 
-    session_manager.save_session(&working_session)?;
+    let mut latest = session_manager.load_session(session_id)?;
+    latest.messages = working_session.messages;
+    session_manager.save_session(&latest)?;
     let _ = tx.send(BackendEvent::SessionChanged {
-        id: working_session.id.clone(),
-        title: working_session.title.clone(),
+        id: latest.id.clone(),
+        title: latest.title.clone(),
     });
     let _ = tx.send(BackendEvent::TurnFinished {
         session_id: session_id.to_string(),
@@ -845,8 +912,10 @@ struct TuiApp {
     history_cursor: Option<usize>,
     history_draft: String,
     show_session_popup: bool,
+    show_loaded_popup: bool,
     popup_sessions: Vec<SessionMeta>,
     popup_selected: usize,
+    loaded_popup_lines: Vec<String>,
     next_task_id: u64,
     active_task_lines: HashMap<u64, usize>,
     active_task_sessions: HashMap<u64, String>,
@@ -888,8 +957,10 @@ impl TuiApp {
             history_cursor: None,
             history_draft: String::new(),
             show_session_popup: false,
+            show_loaded_popup: false,
             popup_sessions: Vec::new(),
             popup_selected: 0,
+            loaded_popup_lines: Vec::new(),
             next_task_id: 1,
             active_task_lines: HashMap::new(),
             active_task_sessions: HashMap::new(),
@@ -1213,6 +1284,23 @@ impl TuiApp {
         self.show_session_popup = false;
         self.popup_sessions.clear();
         self.popup_selected = 0;
+    }
+
+    fn open_loaded_popup(&mut self, session: &ChatSession) {
+        self.show_loaded_popup = true;
+        self.loaded_popup_lines.clear();
+        self.loaded_popup_lines.push(format!("session: {} ({})", session.id, session.title));
+        self.loaded_popup_lines
+            .push(format!("memory_loaded: {}", join_loaded_entries(&session.memory_loaded.entries)));
+        self.loaded_popup_lines
+            .push(format!("skills_loaded: {}", join_loaded_entries(&session.skills_loaded.entries)));
+        self.loaded_popup_lines
+            .push(format!("tools_loaded: {}", join_loaded_entries(&session.tools_loaded.entries)));
+    }
+
+    fn close_loaded_popup(&mut self) {
+        self.show_loaded_popup = false;
+        self.loaded_popup_lines.clear();
     }
 
     fn popup_prev(&mut self) {
@@ -1623,12 +1711,16 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     let mode = if app.stream_enabled { "stream" } else { "non-stream" };
     let status = Paragraph::new(Line::from(vec![
         Span::styled(status_text, status_style),
-        Span::raw(format!(" | 模式: {} | PgUp/PgDn滚动 | F2会话", mode)),
+        Span::raw(format!(" | 模式: {} | PgUp/PgDn滚动 | F2会话 | F3资源", mode)),
     ]));
     frame.render_widget(status, chunks[2]);
 
     if app.show_session_popup {
         draw_session_popup(frame, app);
+    }
+
+    if app.show_loaded_popup {
+        draw_loaded_popup(frame, app);
     }
 }
 
@@ -1653,6 +1745,35 @@ fn draw_session_popup(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     let mut state = ListState::default();
     state.select(Some(app.popup_selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_loaded_popup(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
+    let area = centered_rect(75, 45, frame.area());
+    frame.render_widget(Clear, area);
+
+    let lines = app
+        .loaded_popup_lines
+        .iter()
+        .cloned()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title("已加载资源（Esc/F3/Enter关闭）")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(panel, area);
+}
+
+fn join_loaded_entries(entries: &[String]) -> String {
+    if entries.is_empty() {
+        "(none)".to_string()
+    } else {
+        entries.join(", ")
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
