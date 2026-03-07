@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 
+use crate::log;
 use crate::model::ChatModel;
 use crate::types::{
     AssistantReply, ChatRequest, Message, MessageContent, MessageDelta, StreamChunk, StreamResult, ToolCall,
@@ -54,9 +55,24 @@ impl ChatModel for DeepSeekModel {
             .json(&request)
             .send()
             .await
-            .context("发送请求失败")?
-            .error_for_status()
-            .context("请求返回错误状态")?
+            .context("发送请求失败")?;
+
+        if response.status().as_u16() != 200 {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+            log::error(format!(
+                "[model/deepseek] chat_once non-200: status={} model={} base_url={} message_count={} tool_count={} body={}",
+                status,
+                self.model,
+                self.base_url,
+                messages.len(),
+                tools.map(|t| t.len()).unwrap_or(0),
+                preview_http_body(&body, 500)
+            ));
+            return Err(anyhow!("请求返回错误状态: {}", status));
+        }
+
+        let response = response
             .json::<serde_json::Value>()
             .await
             .context("解析响应失败")?;
@@ -100,9 +116,22 @@ impl ChatModel for DeepSeekModel {
             .json(&request)
             .send()
             .await
-            .context("发送请求失败")?
-            .error_for_status()
-            .context("请求返回错误状态")?;
+            .context("发送请求失败")?;
+
+        if response.status().as_u16() != 200 {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+            log::error(format!(
+                "[model/deepseek] stream_chat_collect non-200: status={} model={} base_url={} message_count={} tool_count={} body={}",
+                status,
+                self.model,
+                self.base_url,
+                messages.len(),
+                tools.map(|t| t.len()).unwrap_or(0),
+                preview_http_body(&body, 500)
+            ));
+            return Err(anyhow!("请求返回错误状态: {}", status));
+        }
 
         let mut content = String::new();
         let mut tool_builders: Vec<ToolCallBuilder> = Vec::new();
@@ -207,5 +236,14 @@ fn merge_tool_call_deltas(deltas: &[ToolCallDelta], builders: &mut Vec<ToolCallB
                 builder.arguments.push_str(arguments);
             }
         }
+    }
+}
+
+fn preview_http_body(body: &str, max_chars: usize) -> String {
+    let normalized = body.replace('\n', " ").trim().to_string();
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        format!("{}...", normalized.chars().take(max_chars).collect::<String>())
     }
 }

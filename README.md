@@ -474,6 +474,13 @@ cargo run -- --config D:\\Projects\\rustclaw\\.rustclaw\\config.toml
 cargo run -- --config=D:\\Projects\\rustclaw\\.rustclaw\\config.toml --conversation telegram
 ```
 
+大模型连接检验：
+
+```cmd
+cargo run -- --model-check
+cargo run -- --config D:\\Projects\\rustclaw\\.rustclaw\\config.toml --model-check
+```
+
 单次调用（callOnce）：
 
 ```cmd

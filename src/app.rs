@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -163,6 +163,71 @@ pub async fn run() -> Result<()> {
     let _ = session_manager.save_all();
     restore_terminal(&mut terminal)?;
     result
+}
+
+pub async fn check_model_connection() -> Result<String> {
+    let config_path = resolve_config_path();
+    let config = load_config(&config_path)?;
+    let model_config = config.model;
+    let base_url = crate::config::resolve_base_url(&model_config)?;
+    let client = create_model_provider(&model_config)?;
+
+    let probe_messages = vec![
+        Message {
+            role: "system".to_string(),
+            content: Some(MessageContent::text(
+                "你是连接探针助手。请严格回复一个词：pong".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+        Message {
+            role: "user".to_string(),
+            content: Some(MessageContent::text(
+                "连接检验：请回复 pong".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+    ];
+
+    let start = Instant::now();
+    let reply = client
+        .chat_once(&probe_messages, None)
+        .await
+        .with_context(|| {
+            format!(
+                "模型连接检验失败，请检查配置: backend={} model={} base_url={} api_key",
+                model_config.backend, model_config.name, base_url
+            )
+        })?;
+    let elapsed_ms = start.elapsed().as_millis();
+
+    let content = reply.content.unwrap_or_default();
+    let has_tool_calls = !reply.tool_calls.is_empty();
+    if content.trim().is_empty() && !has_tool_calls {
+        return Err(anyhow!("模型请求成功，但未返回可用内容"));
+    }
+
+    Ok(format!(
+        "模型连接检验通过\n- backend={}\n- model={}\n- base_url={}\n- latency_ms={}\n- reply_preview={}",
+        model_config.backend,
+        model_config.name,
+        base_url,
+        elapsed_ms,
+        preview_chars_for_check(&content, 120)
+    ))
+}
+
+fn preview_chars_for_check(text: &str, max_chars: usize) -> String {
+    let normalized = text.replace('\n', " ").trim().to_string();
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        format!("{}...", normalized.chars().take(max_chars).collect::<String>())
+    }
 }
 
 pub async fn call_once(user_input: &str) -> Result<String> {

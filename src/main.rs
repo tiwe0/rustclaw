@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
     let mut raw_args = env::args().skip(1).collect::<Vec<_>>();
     let mut once_image_data_url: Option<String> = None;
     let mut once_session: Option<String> = None;
+    let mut model_check = false;
     let mut index = 0;
     while index < raw_args.len() {
         match raw_args[index].as_str() {
@@ -77,10 +78,20 @@ async fn main() -> Result<()> {
                 }
                 once_session = Some(value);
             }
+            "--model-check" => {
+                model_check = true;
+                raw_args.remove(index);
+            }
             _ => {
                 index += 1;
             }
         }
+    }
+
+    if model_check {
+        let output = app::check_model_connection().await?;
+        println!("{}", output);
+        return Ok(());
     }
 
     let mut args = raw_args.into_iter();
