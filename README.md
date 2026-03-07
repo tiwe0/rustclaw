@@ -15,6 +15,7 @@
 - 会话管理（SQLite 持久化：创建/切换/列出/清空）
 - tools 插件模式
 - web_browser 工具（Chromiumoxide：open/goto/click/input/screenshot/content）
+- screen_capture 工具（Android screencap：整屏截图保存）
 - skills 工具（可插拔后端，当前支持 markdown）
 - channel 模块（可接入 Telegram 等通讯软件）
 - cron 模块（定时唤醒 agent 执行预设 job）
@@ -23,6 +24,12 @@
 ## 依赖
 - Rust 1.78+（edition 2024）
 - DeepSeek API Key 或 OpenAI API Key
+
+## Android 优化分支（feature profile）
+- 默认构建为桌面能力（含 `web_browser`）：`cargo check`
+- 移动端构建建议关闭默认 feature：`cargo check --no-default-features --features mobile`
+- `web_browser`（Chromiumoxide）已改为可选特性，仅在 `desktop` profile 启用
+- 示例二进制 `chromiumoxide_baidu` 需要 `web_browser` 特性才会参与编译
 
 ## 配置（TOML）
 
@@ -504,6 +511,107 @@ web_browser 工具使用规则（必须遵守）：
 	"name": "web_browser",
 	"arguments": {
 		"action": "sessions"
+	}
+}
+```
+
+## input 工具参数说明（Android / evdev）
+
+工具名：`input`
+
+用途：通过 `evdev/uinput` 模拟 Android 输入动作，支持点击、长按、滑动。
+
+注意事项：
+- 仅在 Linux/Android 可用；Windows/macOS 会返回 `ok=false`
+- 需要系统具备 `/dev/uinput` 与相应权限（Android 通常需要 root 或系统级权限）
+
+参数说明：
+- `action`：动作类型，支持 `tap` / `long_press` / `swipe`
+- `x`、`y`：`tap/long_press` 坐标
+- `x1`、`y1`、`x2`、`y2`：`swipe` 起点和终点坐标
+- `duration_ms`：动作时长（毫秒）
+- `steps`：`swipe` 插值步数（默认 `16`）
+- `max_x`、`max_y`：坐标边界（默认 `1080x2400`）
+
+示例参数（可直接给模型调用）：
+
+1) 点击：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "tap",
+		"x": 540,
+		"y": 1200,
+		"duration_ms": 60
+	}
+}
+```
+
+2) 长按：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "long_press",
+		"x": 540,
+		"y": 1600,
+		"duration_ms": 1200
+	}
+}
+```
+
+3) 滑动：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "swipe",
+		"x1": 540,
+		"y1": 1900,
+		"x2": 540,
+		"y2": 700,
+		"duration_ms": 400,
+		"steps": 20
+	}
+}
+```
+
+## screen_capture 工具参数说明（Android screencap）
+
+工具名：`screen_capture`
+
+用途：调用系统命令 `screencap -p` 截图，并直接返回 PNG 的 base64（不落盘）。
+
+注意事项：
+- 仅在 Linux/Android 可用；Windows/macOS 会返回 `ok=false`
+- Android 设备需要存在 `screencap` 命令（通常在 `/system/bin/screencap`）
+
+参数说明：
+- `timeout_seconds`：超时秒数（默认 `15`）
+- `with_data_url`：是否附带 `data:image/png;base64,...`（默认 `true`）
+
+返回说明：
+- `ok`：是否执行成功
+- `bytes`：原始 PNG 字节数
+- `width`、`height`：屏幕分辨率（解析自 `wm size`，可能为空）
+- `mime_type`：固定为 `image/png`
+- `image_base64`：截图内容（base64）
+- `data_url`：可直接给多模态模型的 Data URL（当 `with_data_url=true` 时返回）
+- `elapsed_ms`：执行耗时
+- `stderr`：命令错误信息
+
+示例参数（可直接给模型调用）：
+
+```json
+{
+	"name": "screen_capture",
+	"arguments": {
+		"timeout_seconds": 20,
+		"with_data_url": true
 	}
 }
 ```

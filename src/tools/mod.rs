@@ -13,14 +13,17 @@ use crate::skills::SkillsBackend;
 use crate::types::{Message, ToolCall, ToolDefinition};
 
 pub mod http;
-pub mod web;
 pub mod exec;
+pub mod input;
+pub mod screen_capture;
 pub mod cron;
 pub mod awareness;
 pub mod memory;
 pub mod manager;
 pub mod skills;
 pub mod time;
+#[cfg(feature = "web_browser")]
+pub mod web;
 
 #[async_trait]
 pub trait ToolPlugin: Send + Sync {
@@ -55,8 +58,9 @@ impl ToolManager {
         let mut available_tools = vec![
             "get_time".to_string(),
             "http_request".to_string(),
-            "web_browser".to_string(),
             "exec_command".to_string(),
+            "input".to_string(),
+            "screen_capture".to_string(),
             "cron_job_manager".to_string(),
             "awareness".to_string(),
             "session_resource_manager".to_string(),
@@ -64,8 +68,14 @@ impl ToolManager {
 
         manager.register(Box::new(time::TimeTool));
         manager.register(Box::new(http::HttpTool));
-        manager.register(Box::new(web::WebBrowserTool));
+        #[cfg(feature = "web_browser")]
+        {
+            available_tools.push("web_browser".to_string());
+            manager.register(Box::new(web::WebBrowserTool));
+        }
         manager.register(Box::new(exec::ExecTool));
+        manager.register(Box::new(input::InputTool));
+        manager.register(Box::new(screen_capture::ScreenCaptureTool));
         manager.register(Box::new(cron::CronTool));
         manager.register(Box::new(awareness::AwarenessTool));
         if let Some(backend) = memory_backend {

@@ -69,7 +69,7 @@ fn log_loaded_dirs(
 }
 
 fn build_react_system_prompt(stop_marker: &str) -> String {
-    format!(
+    let mut prompt = format!(
         "你是一个具备 ReAct 工作流的助手。
 
 目标：高质量完成用户请求。
@@ -86,7 +86,13 @@ fn build_react_system_prompt(stop_marker: &str) -> String {
 输出要求：
 - 回答简洁、准确、可执行。
 - 不暴露内部思维链路，只给必要结论和步骤。
-- 若工具失败，说明失败原因并给出可行替代方案。
+- 若工具失败，说明失败原因并给出可行替代方案。",
+        marker = stop_marker
+    );
+
+    if cfg!(feature = "web_browser") {
+        prompt.push_str(
+            "
 
 web_browser 工具使用规则（必须遵守）：
 - 该工具支持 action：open / close / sessions / goto / scroll / html / content / click / input / screenshot。
@@ -96,8 +102,10 @@ web_browser 工具使用规则（必须遵守）：
 - 任务结束后主动调用 close 释放浏览器资源。
 - close 必须提供 session_id；click/input 通常需要 selector；input 需要 text。
 - 若返回 ok=false 的工具结果，先阅读 error 再修正参数或更换策略，不要重复同一错误调用。",
-        marker = stop_marker
-    )
+        );
+    }
+
+    prompt
 }
 
 fn session_loaded_state_from_session(session: &ChatSession) -> SessionLoadedState {
