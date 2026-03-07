@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::app;
-use crate::config::TelegramChannelConfig;
+use crate::config::{TelegramChannelConfig, load_config, resolve_config_path};
 use crate::interrupt;
 use crate::types::{Message as ChatMessage, ToolCall};
 
@@ -119,6 +119,7 @@ async fn handle_message_update(
     let message_id = msg.id;
     let thread_id = msg.thread_id;
     let telegram_session_id = format!("telegram_{}", chat_id.0);
+    let model_backend = resolve_model_backend_label();
 
     if let Some(limit_chat_id) = cfg.chat_id
         && chat_id.0 != limit_chat_id
@@ -415,13 +416,55 @@ async fn handle_message_update(
     match generation_task.await {
         Ok(Ok(_)) => {
             println!(
+                "[channel/telegram] model_response: backend={} success=true chat_id={} message_id={} session_id={}",
+                model_backend,
+                chat_id.0,
+                message_id.0,
+                telegram_session_id
+            );
+            println!(
                 "[channel/telegram] complete: chat_id={} message_id={}",
                 chat_id.0, message_id.0
             );
             Ok(())
         }
-        Ok(Err(err)) => Err(anyhow::anyhow!("处理消息失败: {}", err)),
-        Err(err) => Err(anyhow::anyhow!("处理消息失败: 任务异常: {}", err)),
+        Ok(Err(err)) => {
+            println!(
+                "[channel/telegram] model_response: backend={} success=false chat_id={} message_id={} session_id={} err={}",
+                model_backend,
+                chat_id.0,
+                message_id.0,
+                telegram_session_id,
+                err
+            );
+            Err(anyhow::anyhow!("处理消息失败: {}", err))
+        }
+        Err(err) => {
+            println!(
+                "[channel/telegram] model_response: backend={} success=false chat_id={} message_id={} session_id={} err={}",
+                model_backend,
+                chat_id.0,
+                message_id.0,
+                telegram_session_id,
+                err
+            );
+            Err(anyhow::anyhow!("处理消息失败: 任务异常: {}", err))
+        }
+    }
+}
+
+fn resolve_model_backend_label() -> String {
+    let config_path = resolve_config_path();
+    match load_config(&config_path) {
+        Ok(cfg) => format!("{}/{}", cfg.model.backend, cfg.model.name),
+        Err(err) => {
+            println!(
+                "[channel/telegram] resolve model backend failed: config_path={} err={}",
+                config_path,
+                err
+            );
+            "unknown/unknown".to_string()
+        }
     }
 }
 

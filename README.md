@@ -367,17 +367,27 @@ enabled = false
 
 工具名：`input`
 
-用途：通过系统 `input` 命令模拟 Android 输入动作，支持点击、长按、滑动。
+用途：通过系统 `input` 命令模拟 Android 输入动作，支持点击、长按、滑动、返回、Home、最近任务、通知栏、快捷设置、电源键、音量键。
 
 注意事项：
 - 运行环境需具备 `input` 命令（Android 常见为 `/system/bin/input`）
 
 参数说明：
-- `action`：动作类型，支持 `tap` / `long_press` / `swipe`
+- `action`：动作类型，支持 `tap` / `long_press` / `swipe` / `back` / `home` / `recent_apps` / `notifications` / `quick_settings` / `power_short` / `power_long` / `volume_up` / `volume_down`
 - `x`、`y`：`tap/long_press` 坐标
 - `x1`、`y1`、`x2`、`y2`：`swipe` 起点和终点坐标
 - `duration_ms`：动作时长（毫秒）
+- `steps`：`swipe` 轨迹点数量（默认 `18`，非均匀分布）
+- `swipe_profile`：`swipe` 预设参数，支持 `human_fast` / `human_natural` / `human_slow`
+- `noise_px`：`swipe` 轨迹随机噪音像素（默认按滑动距离自适应）
+- `max_x`、`max_y`：`swipe` 坐标边界（默认 `1080`/`2400`）
 - `timeout_seconds`：命令超时秒数（默认 `10`）
+
+`swipe` 轨迹说明：
+- 使用贝塞尔曲线生成基础轨迹
+- 叠加随机噪音，且中段噪音更明显、首尾更平滑
+- 轨迹点采用非均匀分布，不是等间隔直线插值
+- `swipe_profile` 会自动调优 `duration_ms` / `steps` / `noise_px`
 
 示例参数（可直接给模型调用）：
 
@@ -420,7 +430,109 @@ enabled = false
 		"y1": 1900,
 		"x2": 540,
 		"y2": 700,
-		"duration_ms": 400
+		"duration_ms": 400,
+		"steps": 20,
+		"noise_px": 10,
+		"swipe_profile": "human_natural"
+	}
+}
+```
+
+4) 返回：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "back"
+	}
+}
+```
+
+5) Home：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "home"
+	}
+}
+```
+
+6) 最近任务：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "recent_apps"
+	}
+}
+```
+
+7) 打开通知栏：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "notifications"
+	}
+}
+```
+
+8) 打开快捷设置：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "quick_settings"
+	}
+}
+```
+
+9) 电源短按：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "power_short"
+	}
+}
+```
+
+10) 电源长按：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "power_long"
+	}
+}
+```
+
+11) 音量加大：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "volume_up"
+	}
+}
+```
+
+12) 音量减小：
+
+```json
+{
+	"name": "input",
+	"arguments": {
+		"action": "volume_down"
 	}
 }
 ```
