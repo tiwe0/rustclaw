@@ -22,8 +22,6 @@ pub mod memory;
 pub mod manager;
 pub mod skills;
 pub mod time;
-#[cfg(feature = "web_browser")]
-pub mod web;
 
 #[async_trait]
 pub trait ToolPlugin: Send + Sync {
@@ -68,11 +66,6 @@ impl ToolManager {
 
         manager.register(Box::new(time::TimeTool));
         manager.register(Box::new(http::HttpTool));
-        #[cfg(feature = "web_browser")]
-        {
-            available_tools.push("web_browser".to_string());
-            manager.register(Box::new(web::WebBrowserTool));
-        }
         manager.register(Box::new(exec::ExecTool));
         manager.register(Box::new(input::InputTool));
         manager.register(Box::new(screen_capture::ScreenCaptureTool));

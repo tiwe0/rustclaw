@@ -1,21 +1,14 @@
-use anyhow::Result;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use anyhow::Context;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use base64::Engine;
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::process::Stdio;
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use tokio::process::Command;
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use tokio::time::{timeout, Duration, Instant};
 
 use crate::tools::ToolPlugin;
 use crate::types::{ToolDefinition, ToolSchema};
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 
 pub struct ScreenCaptureTool;
@@ -51,77 +44,62 @@ impl ToolPlugin for ScreenCaptureTool {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            let timeout_secs = args
-                .get("timeout_seconds")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(DEFAULT_TIMEOUT_SECS)
-                .clamp(1, 120);
+        let timeout_secs = args
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, 120);
 
-            let with_data_url = args
-                .get("with_data_url")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+        let with_data_url = args
+            .get("with_data_url")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
-            let start = Instant::now();
-            let capture_result = capture_with_screencap(timeout_secs).await?;
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let (width, height) = read_screen_size(timeout_secs).await.unwrap_or((None, None));
+        let start = Instant::now();
+        let capture_result = capture_with_screencap(timeout_secs).await?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let (width, height) = read_screen_size(timeout_secs).await.unwrap_or((None, None));
 
-            if !capture_result.ok {
-                return Ok(json!({
-                    "ok": false,
-                    "bytes": 0,
-                    "width": width,
-                    "height": height,
-                    "elapsed_ms": elapsed_ms,
-                    "stderr": capture_result.stderr,
-                    "backend": "screencap"
-                }));
-            }
-
-            let image_base64 = base64::engine::general_purpose::STANDARD.encode(&capture_result.image_bytes);
-            let data_url = if with_data_url {
-                Some(format!("data:image/png;base64,{}", image_base64))
-            } else {
-                None
-            };
-
+        if !capture_result.ok {
             return Ok(json!({
-                "ok": true,
-                "bytes": capture_result.image_bytes.len(),
+                "ok": false,
+                "bytes": 0,
                 "width": width,
                 "height": height,
-                "mime_type": "image/png",
-                "image_base64": image_base64,
-                "data_url": data_url,
                 "elapsed_ms": elapsed_ms,
                 "stderr": capture_result.stderr,
                 "backend": "screencap"
             }));
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        {
-            let _ = args;
-            Ok(json!({
-                "ok": false,
-                "error": "screen_capture 仅支持 Linux/Android（需要系统 screencap 命令）",
-                "backend": "screencap"
-            }))
-        }
+        let image_base64 = base64::engine::general_purpose::STANDARD.encode(&capture_result.image_bytes);
+        let data_url = if with_data_url {
+            Some(format!("data:image/png;base64,{}", image_base64))
+        } else {
+            None
+        };
+
+        Ok(json!({
+            "ok": true,
+            "bytes": capture_result.image_bytes.len(),
+            "width": width,
+            "height": height,
+            "mime_type": "image/png",
+            "image_base64": image_base64,
+            "data_url": data_url,
+            "elapsed_ms": elapsed_ms,
+            "stderr": capture_result.stderr,
+            "backend": "screencap"
+        }))
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 struct CaptureResult {
     ok: bool,
     image_bytes: Vec<u8>,
     stderr: String,
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 async fn capture_with_screencap(timeout_secs: u64) -> Result<CaptureResult> {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg("screencap -p");
@@ -147,7 +125,6 @@ async fn capture_with_screencap(timeout_secs: u64) -> Result<CaptureResult> {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 async fn read_screen_size(timeout_secs: u64) -> Result<(Option<u32>, Option<u32>)> {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg("wm size");
@@ -166,7 +143,6 @@ async fn read_screen_size(timeout_secs: u64) -> Result<(Option<u32>, Option<u32>
     Ok(parse_wm_size(&text))
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 fn parse_wm_size(text: &str) -> (Option<u32>, Option<u32>) {
     for line in text.lines() {
         let candidate = line.split(':').nth(1).unwrap_or(line).trim();
@@ -180,3 +156,4 @@ fn parse_wm_size(text: &str) -> (Option<u32>, Option<u32>) {
     }
     (None, None)
 }
+
