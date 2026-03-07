@@ -25,7 +25,7 @@ use crate::react_agent::{run_react_loop, ReActOptions, ReActStopReason, SessionL
 use crate::session::{ChatSession, SessionManager, SessionMeta, session_db_path, session_dir_path};
 use crate::skills::create_skills_backend;
 use crate::tools::ToolManager;
-use crate::types::{Message, ToolCall};
+use crate::types::{Message, MessageContent, ToolCall};
 
 const MAX_LINES: usize = 1000;
 const SCROLL_STEP: usize = 8;
@@ -169,8 +169,29 @@ pub async fn call_once(user_input: &str) -> Result<String> {
     call_once_with_session(user_input, None).await
 }
 
+pub async fn call_once_with_image_data_url(user_input: &str, image_data_url: &str) -> Result<String> {
+    call_once_with_image_data_url_and_session(user_input, image_data_url, None).await
+}
+
 pub async fn call_once_with_session(user_input: &str, session: Option<&str>) -> Result<String> {
     call_once_stream_with_session(user_input, session, |_| {}).await
+}
+
+pub async fn call_once_with_image_data_url_and_session(
+    user_input: &str,
+    image_data_url: &str,
+    session: Option<&str>,
+) -> Result<String> {
+    call_once_react_with_session_internal(
+        user_input,
+        Some(image_data_url),
+        session,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
 }
 
 pub async fn call_once_stream_with_session<F>(
@@ -196,6 +217,60 @@ where
 
 pub async fn call_once_react_with_session<FStart, FToken, FTool, FToolResult>(
     user_input: &str,
+    session: Option<&str>,
+    on_assistant_started: FStart,
+    on_token: FToken,
+    on_tool_calls_started: FTool,
+    on_tool_results: FToolResult,
+) -> Result<String>
+where
+    FStart: FnMut(usize),
+    FToken: FnMut(&str) + Send,
+    FTool: FnMut(&[ToolCall]),
+    FToolResult: FnMut(&[Message]),
+{
+    call_once_react_with_session_internal(
+        user_input,
+        None,
+        session,
+        on_assistant_started,
+        on_token,
+        on_tool_calls_started,
+        on_tool_results,
+    )
+    .await
+}
+
+pub async fn call_once_react_with_image_data_url_and_session<FStart, FToken, FTool, FToolResult>(
+    user_input: &str,
+    image_data_url: &str,
+    session: Option<&str>,
+    on_assistant_started: FStart,
+    on_token: FToken,
+    on_tool_calls_started: FTool,
+    on_tool_results: FToolResult,
+) -> Result<String>
+where
+    FStart: FnMut(usize),
+    FToken: FnMut(&str) + Send,
+    FTool: FnMut(&[ToolCall]),
+    FToolResult: FnMut(&[Message]),
+{
+    call_once_react_with_session_internal(
+        user_input,
+        Some(image_data_url),
+        session,
+        on_assistant_started,
+        on_token,
+        on_tool_calls_started,
+        on_tool_results,
+    )
+    .await
+}
+
+async fn call_once_react_with_session_internal<FStart, FToken, FTool, FToolResult>(
+    user_input: &str,
+    image_data_url: Option<&str>,
     session: Option<&str>,
     mut on_assistant_started: FStart,
     mut on_token: FToken,
@@ -265,16 +340,22 @@ where
     } else {
         vec![Message {
             role: "system".to_string(),
-            content: Some(system_prompt.clone()),
+            content: Some(MessageContent::text(system_prompt.clone())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
         }]
     };
 
+    let user_content = if let Some(url) = image_data_url {
+        MessageContent::text_with_image_url(user_input.to_string(), url.to_string())
+    } else {
+        MessageContent::text(user_input.to_string())
+    };
+
     working_messages.push(Message {
         role: "user".to_string(),
-        content: Some(user_input.to_string()),
+        content: Some(user_content),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -359,8 +440,14 @@ where
     let final_content = working_messages
         .iter()
         .rev()
-        .find(|m| m.role == "assistant" && m.content.as_ref().map(|s| !s.is_empty()).unwrap_or(false))
-        .and_then(|m| m.content.clone())
+        .find(|m| {
+            m.role == "assistant"
+                && m.content
+                    .as_ref()
+                    .map(MessageContent::is_non_empty)
+                    .unwrap_or(false)
+        })
+        .and_then(|m| m.content.as_ref().map(MessageContent::to_plain_text))
         .unwrap_or_default();
 
     let mut output = final_content;
@@ -539,7 +626,7 @@ async fn run_tui_loop(
                                 }
                                 locked.messages.push(Message {
                                     role: "user".to_string(),
-                                    content: Some(line.clone()),
+                                    content: Some(MessageContent::text(line.clone())),
                                     tool_calls: None,
                                     tool_call_id: None,
                                     name: None,
@@ -714,7 +801,11 @@ async fn execute_command(
                 if message.role == "system" {
                     continue;
                 }
-                let content = message.content.as_deref().unwrap_or("");
+                let content = message
+                    .content
+                    .as_ref()
+                    .map(MessageContent::to_plain_text)
+                    .unwrap_or_default();
                 app.push_line(format!("{}> {}", message.role, content));
             }
         }
@@ -1090,7 +1181,11 @@ impl TuiApp {
             if message.role == "system" {
                 continue;
             }
-            let content = message.content.as_deref().unwrap_or("");
+            let content = message
+                .content
+                .as_ref()
+                .map(MessageContent::to_plain_text)
+                .unwrap_or_default();
             self.lines.push(format!("{}> {}", message.role, content));
         }
         self.chat_scroll = 0;

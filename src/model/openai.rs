@@ -5,7 +5,7 @@ use reqwest::Client;
 
 use crate::model::ChatModel;
 use crate::types::{
-    AssistantReply, ChatRequest, Message, MessageDelta, StreamChunk, StreamResult, ToolCall,
+    AssistantReply, ChatRequest, Message, MessageContent, MessageDelta, StreamChunk, StreamResult, ToolCall,
     ToolCallDelta, ToolDefinition, ToolFunctionCall,
 };
 
@@ -69,10 +69,7 @@ impl ChatModel for OpenAIModel {
             .cloned()
             .context("OpenAI 响应中没有 message")?;
 
-        let content = message
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let content = parse_response_content(message.get("content"));
 
         let tool_calls = match message.get("tool_calls") {
             Some(raw) => serde_json::from_value::<Vec<ToolCall>>(raw.clone())
@@ -160,14 +157,22 @@ impl ChatModel for OpenAIModel {
             .collect();
 
         Ok(StreamResult {
-            content: if content.is_empty() {
-                None
-            } else {
-                Some(content)
-            },
+            content: if content.is_empty() { None } else { Some(content) },
             tool_calls,
         })
     }
+}
+
+fn parse_response_content(raw: Option<&serde_json::Value>) -> Option<String> {
+    let value = raw?;
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+
+    let Ok(content) = serde_json::from_value::<MessageContent>(value.clone()) else {
+        return None;
+    };
+    Some(content.to_plain_text())
 }
 
 fn apply_delta_content(

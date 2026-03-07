@@ -4,7 +4,7 @@ use serde_json::to_string;
 use crate::model::ChatModel;
 use crate::session::{MemoryLoaded, SkillsLoaded, ToolsLoaded};
 use crate::tools::ToolManager;
-use crate::types::{AssistantReply, Message, ToolCall};
+use crate::types::{AssistantReply, Message, MessageContent, ToolCall};
 
 const DEFAULT_STOP_MARKER: &str = "[[REACT_STOP]]";
 
@@ -126,7 +126,7 @@ where
 
         messages.push(Message {
             role: "assistant".to_string(),
-            content: content.clone(),
+            content: content.clone().map(MessageContent::text),
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -175,7 +175,9 @@ where
 
     messages.push(Message {
         role: "assistant".to_string(),
-        content: Some("[ReAct] 已达到最大循环次数，已强制停止。".to_string()),
+        content: Some(MessageContent::text(
+            "[ReAct] 已达到最大循环次数，已强制停止。".to_string(),
+        )),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -256,21 +258,21 @@ fn build_session_injected_system_messages(session_state: &SessionLoadedState) ->
     vec![
         Message {
             role: "system".to_string(),
-            content: Some(format!("skills_loaded={}", skills_json)),
+            content: Some(MessageContent::text(format!("skills_loaded={}", skills_json))),
             tool_calls: None,
             tool_call_id: None,
             name: None,
         },
         Message {
             role: "system".to_string(),
-            content: Some(format!("memory_loaded={}", memory_json)),
+            content: Some(MessageContent::text(format!("memory_loaded={}", memory_json))),
             tool_calls: None,
             tool_call_id: None,
             name: None,
         },
         Message {
             role: "system".to_string(),
-            content: Some(format!("tools_loaded={}", tools_json)),
+            content: Some(MessageContent::text(format!("tools_loaded={}", tools_json))),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -287,7 +289,11 @@ fn split_message_if_needed(message: &Message, max_message_chars: usize) -> Vec<M
         return vec![message.clone()];
     };
 
-    if content.chars().count() <= max_message_chars {
+    let Some(text) = content.as_text() else {
+        return vec![message.clone()];
+    };
+
+    if text.chars().count() <= max_message_chars {
         return vec![message.clone()];
     }
 
@@ -302,11 +308,15 @@ fn split_message_with_same_role(message: &Message, max_message_chars: usize) -> 
         return vec![message.clone()];
     };
 
-    split_text_chunks(content, max_message_chars)
+    let Some(text) = content.as_text() else {
+        return vec![message.clone()];
+    };
+
+    split_text_chunks(text, max_message_chars)
         .into_iter()
         .map(|chunk| {
             let mut m = message.clone();
-            m.content = Some(chunk);
+            m.content = Some(MessageContent::text(chunk));
             m
         })
         .collect()
@@ -383,7 +393,7 @@ fn message_text_len(message: &Message) -> usize {
     let mut total = 0usize;
 
     if let Some(content) = &message.content {
-        total = total.saturating_add(content.chars().count());
+        total = total.saturating_add(content.to_plain_text().chars().count());
     }
 
     if let Some(tool_calls) = &message.tool_calls {

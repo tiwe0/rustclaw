@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::interrupt;
-use crate::types::Message;
+use crate::types::{Message, MessageContent};
 
 const SESSION_DIR_NAME: &str = ".sessions";
 const SESSION_DB_NAME: &str = "sessions.db";
@@ -149,7 +149,7 @@ impl SessionManager {
             title: normalized_id,
             messages: vec![Message {
                 role: "system".to_string(),
-                content: Some(system_prompt.to_string()),
+                content: Some(MessageContent::text(system_prompt.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -178,7 +178,7 @@ impl SessionManager {
             title: normalized_id,
             messages: vec![Message {
                 role: "system".to_string(),
-                content: Some(system_prompt.to_string()),
+                content: Some(MessageContent::text(system_prompt.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -246,7 +246,7 @@ impl SessionManager {
         session.messages.clear();
         session.messages.push(Message {
             role: "system".to_string(),
-            content: Some(system_prompt.to_string()),
+            content: Some(MessageContent::text(system_prompt.to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -454,7 +454,7 @@ impl SessionInner {
             title,
             messages: vec![Message {
                 role: "system".to_string(),
-                content: Some(system_prompt.to_string()),
+                content: Some(MessageContent::text(system_prompt.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

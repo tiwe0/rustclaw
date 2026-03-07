@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use base64::Engine;
+use serde::Deserialize;
 use std::sync::Arc;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::error_handlers::LoggingErrorHandler;
@@ -128,21 +130,27 @@ async fn handle_message_update(
         return Ok(());
     }
 
-    let Some(text) = msg.text() else {
+    let image_data_url = extract_image_data_url_from_telegram_message(&msg, &cfg).await?;
+    let user_text = msg
+        .text()
+        .or_else(|| msg.caption())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let user_input = user_text.trim();
+
+    if user_input.is_empty() && image_data_url.is_none() {
         println!(
-            "[channel/telegram] skip non-text message: chat_id={} message_id={}",
+            "[channel/telegram] skip unsupported message: chat_id={} message_id={}",
             chat_id.0, message_id.0
         );
         return Ok(());
-    };
+    }
 
-    let user_input = text.trim();
     if user_input.is_empty() {
         println!(
-            "[channel/telegram] skip empty text: chat_id={} message_id={}",
+            "[channel/telegram] image-only message: chat_id={} message_id={}",
             chat_id.0, message_id.0
         );
-        return Ok(());
     }
 
     if user_input.eq_ignore_ascii_case("/interrupt")
@@ -166,38 +174,66 @@ async fn handle_message_update(
     }
 
     println!(
-        "[channel/telegram] incoming text: chat_id={} message_id={} session_id={} preview={}",
+        "[channel/telegram] incoming message: chat_id={} message_id={} session_id={} has_image={} preview={}",
         chat_id.0,
         message_id.0,
         telegram_session_id,
+        image_data_url.is_some(),
         preview_input(user_input)
     );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<TelegramReactEvent>();
-    let input_owned = user_input.to_string();
+    let input_owned = if user_input.is_empty() {
+        "请分析这张图片并给出关键信息。".to_string()
+    } else {
+        user_input.to_string()
+    };
+    let image_data_url_owned = image_data_url.clone();
+    let session_id_owned = telegram_session_id.clone();
     let generation_task = tokio::spawn(async move {
         let tx_for_start = event_tx.clone();
         let tx_for_token = event_tx.clone();
         let tx_for_tools = event_tx.clone();
         let tx_for_results = event_tx.clone();
 
-        app::call_once_react_with_session(
-            &input_owned,
-            Some(&telegram_session_id),
-            move |loop_idx| {
-                let _ = tx_for_start.send(TelegramReactEvent::AssistantStarted { loop_idx });
-            },
-            move |token| {
-                let _ = tx_for_token.send(TelegramReactEvent::Token(token.to_string()));
-            },
-            move |tool_calls| {
-                let _ = tx_for_tools.send(TelegramReactEvent::ToolCallsStarted(tool_calls.to_vec()));
-            },
-            move |tool_messages| {
-                let _ = tx_for_results.send(TelegramReactEvent::ToolResults(tool_messages.to_vec()));
-            },
-        )
-        .await
+        if let Some(image_data_url) = image_data_url_owned.as_deref() {
+            app::call_once_react_with_image_data_url_and_session(
+                &input_owned,
+                image_data_url,
+                Some(&session_id_owned),
+                move |loop_idx| {
+                    let _ = tx_for_start.send(TelegramReactEvent::AssistantStarted { loop_idx });
+                },
+                move |token| {
+                    let _ = tx_for_token.send(TelegramReactEvent::Token(token.to_string()));
+                },
+                move |tool_calls| {
+                    let _ = tx_for_tools.send(TelegramReactEvent::ToolCallsStarted(tool_calls.to_vec()));
+                },
+                move |tool_messages| {
+                    let _ = tx_for_results.send(TelegramReactEvent::ToolResults(tool_messages.to_vec()));
+                },
+            )
+            .await
+        } else {
+            app::call_once_react_with_session(
+                &input_owned,
+                Some(&session_id_owned),
+                move |loop_idx| {
+                    let _ = tx_for_start.send(TelegramReactEvent::AssistantStarted { loop_idx });
+                },
+                move |token| {
+                    let _ = tx_for_token.send(TelegramReactEvent::Token(token.to_string()));
+                },
+                move |tool_calls| {
+                    let _ = tx_for_tools.send(TelegramReactEvent::ToolCallsStarted(tool_calls.to_vec()));
+                },
+                move |tool_messages| {
+                    let _ = tx_for_results.send(TelegramReactEvent::ToolResults(tool_messages.to_vec()));
+                },
+            )
+            .await
+        }
     });
 
     let mut current_streamed = String::new();
@@ -312,8 +348,13 @@ async fn handle_message_update(
                 for tool_msg in &tool_messages {
                     let tool_name = tool_msg.name.as_deref().unwrap_or("unknown_tool");
                     let call_id = tool_msg.tool_call_id.as_deref().unwrap_or("unknown_call");
+                    let content_text = tool_msg
+                        .content
+                        .as_ref()
+                        .map(|c| c.to_plain_text())
+                        .unwrap_or_default();
                     let preview = preview_chars(
-                        tool_msg.content.as_deref().unwrap_or(""),
+                        &content_text,
                         180,
                     );
                     println!(
@@ -381,6 +422,84 @@ async fn handle_message_update(
         }
         Ok(Err(err)) => Err(anyhow::anyhow!("处理消息失败: {}", err)),
         Err(err) => Err(anyhow::anyhow!("处理消息失败: 任务异常: {}", err)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramGetFileResponse {
+    ok: bool,
+    result: Option<TelegramFileResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramFileResult {
+    file_path: String,
+}
+
+async fn extract_image_data_url_from_telegram_message(
+    msg: &teloxide::types::Message,
+    cfg: &TelegramChannelConfig,
+) -> Result<Option<String>> {
+    let Some(photo_list) = msg.photo() else {
+        return Ok(None);
+    };
+    let Some(largest) = photo_list.last() else {
+        return Ok(None);
+    };
+
+    let file_id = largest.file.id.to_string();
+    let api_base = cfg.api_base_url.trim_end_matches('/');
+    let token = cfg.bot_token.trim();
+    let client = reqwest::Client::new();
+
+    let get_file_url = format!("{}/bot{}/getFile", api_base, token);
+    let file_meta = client
+        .get(get_file_url)
+        .query(&[("file_id", file_id.as_str())])
+        .send()
+        .await
+        .context("Telegram getFile 请求失败")?
+        .error_for_status()
+        .context("Telegram getFile 返回错误状态码")?
+        .json::<TelegramGetFileResponse>()
+        .await
+        .context("解析 Telegram getFile 响应失败")?;
+
+    if !file_meta.ok {
+        return Err(anyhow::anyhow!("Telegram getFile 返回 ok=false"));
+    }
+
+    let file_path = file_meta
+        .result
+        .map(|r| r.file_path)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Telegram getFile 缺少 file_path"))?;
+
+    let file_download_url = format!("{}/file/bot{}/{}", api_base, token, file_path);
+    let bytes = client
+        .get(file_download_url)
+        .send()
+        .await
+        .context("下载 Telegram 图片失败")?
+        .error_for_status()
+        .context("下载 Telegram 图片返回错误状态码")?
+        .bytes()
+        .await
+        .context("读取 Telegram 图片字节失败")?;
+
+    let mime = infer_image_mime_from_path(&file_path);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(Some(format!("data:{};base64,{}", mime, image_base64)))
+}
+
+fn infer_image_mime_from_path(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
     }
 }
 
@@ -495,7 +614,11 @@ fn format_tool_result_for_telegram(msg: &ChatMessage) -> String {
         .tool_call_id
         .clone()
         .unwrap_or_else(|| "unknown_call".to_string());
-    let content = msg.content.clone().unwrap_or_default();
+    let content = msg
+        .content
+        .as_ref()
+        .map(|c| c.to_plain_text())
+        .unwrap_or_default();
     let preview = preview_chars(&content, 1200);
     format!("🧾 function call 结果\n- tool={}\n- call_id={}\n- result={}", name, call_id, preview)
 }

@@ -20,6 +20,8 @@ mod types;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut raw_args = env::args().skip(1).collect::<Vec<_>>();
+    let mut once_image_data_url: Option<String> = None;
+    let mut once_session: Option<String> = None;
     let mut index = 0;
     while index < raw_args.len() {
         match raw_args[index].as_str() {
@@ -39,6 +41,42 @@ async fn main() -> Result<()> {
                 raw_args.remove(index);
                 config::set_config_path_override(&config_path)?;
             }
+            "--image-data-url" => {
+                if index + 1 >= raw_args.len() {
+                    return Err(anyhow::anyhow!("参数错误：--image-data-url 需要一个值"));
+                }
+                once_image_data_url = Some(raw_args.remove(index + 1));
+                raw_args.remove(index);
+            }
+            _ if raw_args[index].starts_with("--image-data-url=") => {
+                let value = raw_args[index]
+                    .strip_prefix("--image-data-url=")
+                    .unwrap_or_default()
+                    .to_string();
+                raw_args.remove(index);
+                if value.trim().is_empty() {
+                    return Err(anyhow::anyhow!("参数错误：--image-data-url 不能为空"));
+                }
+                once_image_data_url = Some(value);
+            }
+            "--session" => {
+                if index + 1 >= raw_args.len() {
+                    return Err(anyhow::anyhow!("参数错误：--session 需要一个值"));
+                }
+                once_session = Some(raw_args.remove(index + 1));
+                raw_args.remove(index);
+            }
+            _ if raw_args[index].starts_with("--session=") => {
+                let value = raw_args[index]
+                    .strip_prefix("--session=")
+                    .unwrap_or_default()
+                    .to_string();
+                raw_args.remove(index);
+                if value.trim().is_empty() {
+                    return Err(anyhow::anyhow!("参数错误：--session 不能为空"));
+                }
+                once_session = Some(value);
+            }
             _ => {
                 index += 1;
             }
@@ -50,10 +88,22 @@ async fn main() -> Result<()> {
         if first == "--once" {
             let prompt = args.collect::<Vec<_>>().join(" ");
             if prompt.trim().is_empty() {
-                eprintln!("用法: cargo run -- --once \"你的问题\"");
+                eprintln!("用法: cargo run -- --once [--session sid] [--image-data-url data_url] \"你的问题\"");
                 return Ok(());
             }
-            let output = app::call_once(&prompt).await?;
+
+            let output = if let Some(image_data_url) = once_image_data_url.as_deref() {
+                if let Some(session_id) = once_session.as_deref() {
+                    app::call_once_with_image_data_url_and_session(&prompt, image_data_url, Some(session_id)).await?
+                } else {
+                    app::call_once_with_image_data_url(&prompt, image_data_url).await?
+                }
+            } else if let Some(session_id) = once_session.as_deref() {
+                app::call_once_with_session(&prompt, Some(session_id)).await?
+            } else {
+                app::call_once(&prompt).await?
+            };
+
             println!("{}", output);
             return Ok(());
         }

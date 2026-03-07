@@ -149,6 +149,11 @@ window_size = 0
 - `long_poll_timeout_secs`：Telegram 长轮询超时（秒）
 - `api_base_url`：Telegram API 地址（默认官方地址）
 
+Telegram 消息输入说明：
+- 纯文本消息：按原有方式进入 ReAct 流程
+- 图片+caption：caption 作为文本提示，图片会自动下载并转为 `data:image/...;base64,...` 发送给模型
+- 仅图片消息：会使用默认提示词 `请分析这张图片并给出关键信息。`
+
 `[cron]` 字段说明：
 - `enabled`：是否启用 cron 调度器
 - `tick_ms`：调度检查间隔（毫秒）
@@ -473,6 +478,8 @@ cargo run -- --config=D:\\Projects\\rustclaw\\.rustclaw\\config.toml --conversat
 
 ```cmd
 cargo run -- --once "帮我先查北京时间，再总结成一句话"
+cargo run -- --once --session demo "继续上一轮会话"
+cargo run -- --once --image-data-url "data:image/png;base64,......" "请描述这张图里的关键信息"
 ```
 
 导出全部会话（JSON）：

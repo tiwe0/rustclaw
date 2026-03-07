@@ -1,0 +1,71 @@
+{
+	"model": "your-multimodal-model-name",
+	"messages": [
+		{
+			"role": "system",
+			"content": "你是一个智能烹饪助手。你可以识别菜品图片，并通过函数调用获取详细的菜谱信息。"
+		},
+		{
+			"role": "user",
+			"content": [
+				{
+					"type": "text",
+					"text": "这个菜怎么做？需要什么食材？"
+				},
+				{
+					"type": "image_url",
+					"image_url": {
+						"url": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+					}
+				}
+			]
+		}
+	],
+	"tools": [
+		{
+			"type": "function",
+			"function": {
+				"name": "get_recipe",
+				"description": "获取指定菜品的详细菜谱",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"dish_name": {
+							"type": "string",
+							"description": "菜品名称"
+						},
+						"cuisine_type": {
+							"type": "string",
+							"enum": ["中餐", "西餐", "日料", "其他"],
+							"description": "菜系类型"
+						}
+					},
+					"required": ["dish_name"]
+				}
+			}
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "get_ingredient_substitution",
+				"description": "获取食材替代品",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"ingredient": {
+							"type": "string",
+							"description": "需要替代的食材"
+						},
+						"dietary_restriction": {
+							"type": "string",
+							"enum": ["素食", "清真", "过敏", "无限制"],
+							"description": "饮食限制"
+						}
+					},
+					"required": ["ingredient"]
+				}
+			}
+		}
+	],
+	"tool_choice": "auto"
+}

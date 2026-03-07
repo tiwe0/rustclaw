@@ -10,7 +10,7 @@ use crate::log;
 use crate::memory::MemoryBackend;
 use crate::session::SessionManager;
 use crate::skills::SkillsBackend;
-use crate::types::{Message, ToolCall, ToolDefinition};
+use crate::types::{Message, MessageContent, ToolCall, ToolDefinition};
 
 pub mod http;
 pub mod exec;
@@ -468,7 +468,7 @@ mod tests {
 fn build_tool_message(tool_call_id: String, tool_name: String, payload: Value) -> Message {
     Message {
         role: "tool".to_string(),
-        content: Some(payload.to_string()),
+        content: Some(MessageContent::text(payload.to_string())),
         tool_calls: None,
         tool_call_id: Some(tool_call_id),
         name: Some(tool_name),
