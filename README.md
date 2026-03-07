@@ -462,6 +462,13 @@ enabled = false
 cargo run
 ```
 
+指定配置文件路径启动：
+
+```cmd
+cargo run -- --config D:\\Projects\\rustclaw\\.rustclaw\\config.toml
+cargo run -- --config=D:\\Projects\\rustclaw\\.rustclaw\\config.toml --conversation telegram
+```
+
 单次调用（callOnce）：
 
 ```cmd

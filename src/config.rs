@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -11,6 +12,7 @@ pub const DEFAULT_CONFIG_PATH: &str = "~/.rustclaw/config.toml";
 const DEFAULT_CONFIG_DIR_NAME: &str = ".rustclaw";
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../example.config.toml");
+static CONFIG_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -403,6 +405,10 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
 }
 
 pub fn resolve_config_path() -> String {
+    if let Some(path) = CONFIG_PATH_OVERRIDE.get() {
+        return path.clone();
+    }
+
     if let Err(err) = ensure_default_user_config() {
         eprintln!("[config] 初始化默认配置失败: {err}");
     }
@@ -412,6 +418,17 @@ pub fn resolve_config_path() -> String {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
     })
+}
+
+pub fn set_config_path_override(path: &str) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("--config 需要非空路径"));
+    }
+
+    CONFIG_PATH_OVERRIDE
+        .set(trimmed.to_string())
+        .map_err(|_| anyhow::anyhow!("--config 只能设置一次"))
 }
 
 fn ensure_default_user_config() -> Result<()> {

@@ -19,7 +19,33 @@ mod types;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut args = env::args().skip(1);
+    let mut raw_args = env::args().skip(1).collect::<Vec<_>>();
+    let mut index = 0;
+    while index < raw_args.len() {
+        match raw_args[index].as_str() {
+            "--config" | "-c" => {
+                if index + 1 >= raw_args.len() {
+                    return Err(anyhow::anyhow!("参数错误：--config 需要一个路径"));
+                }
+                let config_path = raw_args.remove(index + 1);
+                raw_args.remove(index);
+                config::set_config_path_override(&config_path)?;
+            }
+            _ if raw_args[index].starts_with("--config=") => {
+                let config_path = raw_args[index]
+                    .strip_prefix("--config=")
+                    .unwrap_or_default()
+                    .to_string();
+                raw_args.remove(index);
+                config::set_config_path_override(&config_path)?;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    let mut args = raw_args.into_iter();
     if let Some(first) = args.next() {
         if first == "--once" {
             let prompt = args.collect::<Vec<_>>().join(" ");
