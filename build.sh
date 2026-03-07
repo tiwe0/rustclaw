@@ -1,0 +1,1 @@
+cargo build --release && su -c "cp target/release/rustclaw /data/local/tmp/rustclaw"
